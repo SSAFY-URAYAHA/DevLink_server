@@ -1,0 +1,12 @@
+spring:
+    config:
+        import: optional:file:./.env[.properties]
+    datasource:
+        url: ${DB_URL}
+        username: ${DB_USERNAME}
+        password: ${DB_PASSWORD}
+    flyway:
+        clean-disabled: true
+devlink:
+    websocket:
+        allowed-origins: ${WS_ALLOWED_ORIGINS}

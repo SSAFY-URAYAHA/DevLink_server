@@ -1,0 +1,10 @@
+spring:
+    config:
+        import: optional:file:./.env[.properties]
+    datasource:
+        url: ${DB_URL:jdbc:postgresql://localhost:5432/devlink}
+        username: ${DB_USERNAME:devlink}
+        password: ${DB_PASSWORD:devlink}
+devlink:
+    websocket:
+        allowed-origins: ${WS_ALLOWED_ORIGINS:http://localhost:3000}

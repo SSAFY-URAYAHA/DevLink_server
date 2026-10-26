@@ -1,0 +1,31 @@
+services:
+    postgres:
+        image: postgres:16
+        environment:
+            POSTGRES_DB: devlink
+            POSTGRES_USER: ${DB_USERNAME:-devlink}
+            POSTGRES_PASSWORD: ${DB_PASSWORD:-devlink}
+        ports:
+            - "5432:5432"
+        volumes:
+            - postgres_data:/var/lib/postgresql/data
+        healthcheck:
+            test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+            interval: 5s
+            timeout: 3s
+            retries: 10
+    app:
+        build: .
+        environment:
+            SPRING_PROFILES_ACTIVE: local
+            DB_URL: jdbc:postgresql://postgres:5432/devlink
+            DB_USERNAME: ${DB_USERNAME:-devlink}
+            DB_PASSWORD: ${DB_PASSWORD:-devlink}
+            WS_ALLOWED_ORIGINS: ${WS_ALLOWED_ORIGINS:-http://localhost:3000}
+        ports:
+            - "8080:8080"
+        depends_on:
+            postgres:
+                condition: service_healthy
+volumes:
+    postgres_data:

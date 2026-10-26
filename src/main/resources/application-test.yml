@@ -1,0 +1,7 @@
+# Datasource connection details are supplied by Testcontainers @ServiceConnection.
+spring:
+    datasource:
+        url: ""
+devlink:
+    websocket:
+        allowed-origins: http://localhost:3000
