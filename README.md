@@ -123,6 +123,7 @@ EC2에는 Docker만 있으면 됩니다. compose 파일([deploy/docker-compose.p
 | EC2_SSH_KEY | pem 파일 내용 전체 (BEGIN~END) |
 | GHCR_PAT | `read:packages` 권한의 GitHub Personal Access Token (EC2가 비공개 이미지를 받을 때 사용) |
 | PROD_ENV | `deploy/.prod.env.example` 형식의 운영 환경 변수 전체 |
+| DISCORD_WEBHOOK_URL | Discord 웹후크 URL 원본 (`/github` 접미사 없이). 없으면 알림만 생략되고 배포는 진행 |
 
 **EC2 1회 설정**
 
