@@ -1,0 +1,35 @@
+# 운영(EC2) 전용 compose. CI/CD가 /opt/devlink/docker-compose.prod.yml 로 복사하고 같은 폴더의 .env 를 읽는다.
+# 앱 이미지는 GHCR에서 받으며 EC2에서는 빌드하지 않는다. DB 포트는 외부에 노출하지 않는다.
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: devlink
+      POSTGRES_USER: ${DB_USERNAME}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    image: ghcr.io/ssafy-urayaha/devlink-server:latest
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      DB_URL: jdbc:postgresql://postgres:5432/devlink
+      DB_USERNAME: ${DB_USERNAME}
+      DB_PASSWORD: ${DB_PASSWORD}
+      WS_ALLOWED_ORIGINS: ${WS_ALLOWED_ORIGINS}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
