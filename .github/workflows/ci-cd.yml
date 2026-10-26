@@ -25,6 +25,24 @@ jobs:
           chmod +x gradlew
           ./gradlew build --no-daemon
 
+      - name: Discord 빌드 실패 알림
+        if: failure()
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          ACTOR: ${{ github.actor }}
+          REF: ${{ github.head_ref || github.ref_name }}
+          EVENT: ${{ github.event_name }}
+          TITLE: ${{ github.event.pull_request.title || github.event.head_commit.message }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$WEBHOOK" ]; then echo "DISCORD_WEBHOOK_URL 미설정, 알림 생략"; exit 0; fi
+          FIRST_LINE=$(printf '%s\n' "$TITLE" | head -n 1)
+          TEXT="🐸 **빌드 · 테스트 실패** ($EVENT, $REF)
+          $FIRST_LINE
+          by $ACTOR · [실행 로그]($RUN_URL)"
+          jq -n --arg c "$TEXT" '{content: $c}' > payload.json
+          curl -sS -H "Content-Type: application/json" -d @payload.json "$WEBHOOK"
+
   deploy:
     name: 이미지 push · EC2 배포
     needs: build
@@ -98,3 +116,22 @@ jobs:
           PROD_ENV: ${{ secrets.PROD_ENV }}
           GHCR_PAT: ${{ secrets.GHCR_PAT }}
           GHCR_USER: ${{ github.actor }}
+
+      - name: Discord 배포 알림
+        if: always()
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          STATUS: ${{ job.status }}
+          ACTOR: ${{ github.actor }}
+          SHA: ${{ github.sha }}
+          MSG: ${{ github.event.head_commit.message }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$WEBHOOK" ]; then echo "DISCORD_WEBHOOK_URL 미설정, 알림 생략"; exit 0; fi
+          if [ "$STATUS" = "success" ]; then ICON="💡"; TITLE="EC2 배포 성공"; else ICON="🤡"; TITLE="EC2 배포 실패"; fi
+          FIRST_LINE=$(printf '%s\n' "$MSG" | head -n 1)
+          TEXT="$ICON **$TITLE** (master)
+          커밋 ${SHA:0:7} · $FIRST_LINE
+          by $ACTOR · [실행 로그]($RUN_URL)"
+          jq -n --arg c "$TEXT" '{content: $c}' > payload.json
+          curl -sS -H "Content-Type: application/json" -d @payload.json "$WEBHOOK"
