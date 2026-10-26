@@ -61,7 +61,7 @@ curl -i http://localhost:8080/api/v1/teams    # 401 JSON (리다이렉트 없음
 | DB_PASSWORD | devlink | PostgreSQL 비밀번호 |
 | WS_ALLOWED_ORIGINS | http://localhost:3000 | WebSocket 허용 Origin (쉼표 구분) |
 
-prod 프로필은 기본값 없이 작업 디렉터리의 `.env` 또는 환경 변수에서 값을 받습니다: `java -jar build/libs/app.jar --spring.profiles.active=prod`. `.env`는 커밋하지 않습니다.
+prod 프로필은 기본값 없이 작업 디렉터리의 `.env` 또는 환경 변수에서 값을 받습니다: `java -jar build/libs/app.jar --spring.profiles.active=prod`. `.env`는 커밋하지 않습니다. 운영 키 목록은 [deploy/.prod.env.example](deploy/.prod.env.example)에 있으며 실제 값은 GitHub Secret `PROD_ENV`로 관리합니다.
 
 ## 4. 패키지 구조
 
@@ -100,11 +100,51 @@ prod 프로필은 기본값 없이 작업 디렉터리의 `.env` 또는 환경 �
 - `SecurityConfig` TODO 두 곳 (세션/CSRF 정책, 인증 필터 연결)
 - `filter/`에 인증 필터·Agent 토큰 필터 추가
 - `WebSocketConfig` 핸드셰이크 인증, STOMP 여부
-- `.env.example`에 쿠키 또는 JWT 변수 추가
+- `.env.example`, `deploy/.prod.env.example`, Secret `PROD_ENV`, `deploy/docker-compose.prod.yml`에 쿠키 또는 JWT 변수 추가
 - 세션 또는 리프레시 토큰 테이블 마이그레이션
 - [보안 전략 문서 4절](docs/security-strategy.md#4-인증-방식-확정-후-결정할-사항) 갱신
 
-## 7. 참고 문서
+## 7. CI/CD · 배포
+
+워크플로우: [.github/workflows/ci-cd.yml](.github/workflows/ci-cd.yml)
+
+| 이벤트 | 동작 |
+| --- | --- |
+| develop·master 푸시, PR | `./gradlew build` (통합 테스트 포함) |
+| master 푸시 | 위 통과 후 Docker 이미지를 `ghcr.io/ssafy-urayaha/devlink-server`에 push → SSH로 EC2 접속 → `docker compose pull && up -d` |
+
+EC2에는 Docker만 있으면 됩니다. compose 파일([deploy/docker-compose.prod.yml](deploy/docker-compose.prod.yml))과 `.env`는 배포 때마다 워크플로우가 `/opt/devlink`에 써 넣습니다.
+
+**GitHub Secrets** (Settings → Secrets and variables → Actions)
+
+| Secret | 값 |
+| --- | --- |
+| EC2_HOST | EC2 호스트명 |
+| EC2_SSH_KEY | pem 파일 내용 전체 (BEGIN~END) |
+| GHCR_PAT | `read:packages` 권한의 GitHub Personal Access Token (EC2가 비공개 이미지를 받을 때 사용) |
+| PROD_ENV | `deploy/.prod.env.example` 형식의 운영 환경 변수 전체 |
+
+**EC2 1회 설정**
+
+```sh
+sudo apt update && sudo apt install -y docker.io docker-compose-v2
+sudo usermod -aG docker ubuntu
+sudo mkdir -p /opt/devlink && sudo chown ubuntu:ubuntu /opt/devlink
+```
+
+재접속 후 `docker ps`가 sudo 없이 되면 준비 완료입니다. 보안 그룹은 22, 8080 인바운드가 필요합니다.
+
+**배포 확인**
+
+```sh
+curl -i http://<EC2_HOST>:8080/api/v1/health
+```
+
+**운영 변수 추가 순서**: `deploy/.prod.env.example`에 키 추가 → Secret `PROD_ENV`에 값 추가 → `docker-compose.prod.yml`의 `app.environment`에 전달 추가 → master 푸시. 키가 빠지면 배포 잡의 "PROD_ENV 키 검사" 단계에서 멈춥니다.
+
+**운영 DB 초기화**가 필요하면 EC2에서 `docker compose -f /opt/devlink/docker-compose.prod.yml down -v`를 실행합니다. 공유 DB이므로 팀 합의 후에만 합니다.
+
+## 8. 참고 문서
 
 - [검증 기록](docs/verification.md): 직접 실행해 확인한 결과
 - [보안 전략](docs/security-strategy.md)

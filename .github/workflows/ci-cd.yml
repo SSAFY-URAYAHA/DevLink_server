@@ -1,0 +1,100 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [develop, master]
+  pull_request:
+    branches: [develop, master]
+
+env:
+  IMAGE: ghcr.io/ssafy-urayaha/devlink-server
+
+jobs:
+  build:
+    name: 빌드 · 테스트
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: gradle
+      - name: Gradle build (통합 테스트 포함)
+        run: |
+          chmod +x gradlew
+          ./gradlew build --no-daemon
+
+  deploy:
+    name: 이미지 push · EC2 배포
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: PROD_ENV 키 검사
+        env:
+          PROD_ENV: ${{ secrets.PROD_ENV }}
+        run: |
+          if [ -z "$PROD_ENV" ]; then
+            echo "::error::Secret PROD_ENV 가 비어 있습니다. deploy/.prod.env.example 을 참고해 등록하세요."
+            exit 1
+          fi
+          missing=0
+          for key in $(grep -E '^[A-Z_]+=' deploy/.prod.env.example | cut -d= -f1); do
+            if ! printf '%s\n' "$PROD_ENV" | grep -q "^$key="; then
+              echo "::error::PROD_ENV 에 $key 가 없습니다"
+              missing=1
+            fi
+          done
+          exit $missing
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ github.sha }}
+
+      - name: compose 파일 복사
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: deploy/docker-compose.prod.yml
+          target: /opt/devlink
+          strip_components: 1
+
+      - name: EC2 배포
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          envs: PROD_ENV,GHCR_PAT,GHCR_USER
+          script: |
+            set -e
+            cd /opt/devlink
+            printf '%s\n' "$PROD_ENV" > .env
+            chmod 600 .env
+            echo "$GHCR_PAT" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+            docker compose -f docker-compose.prod.yml pull app
+            docker compose -f docker-compose.prod.yml up -d
+            docker image prune -f
+            docker compose -f docker-compose.prod.yml ps
+        env:
+          PROD_ENV: ${{ secrets.PROD_ENV }}
+          GHCR_PAT: ${{ secrets.GHCR_PAT }}
+          GHCR_USER: ${{ github.actor }}

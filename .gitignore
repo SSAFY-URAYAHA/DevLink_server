@@ -28,6 +28,7 @@ out/
 .env
 .env.*
 !.env.example
+.prod.env
 
 # ---- 로그 · 임시 파일 ----
 *.log
