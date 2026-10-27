@@ -12,7 +12,7 @@ signup, login, API health와 Actuator health만 공개합니다. 나머지 요�
 
 `/ws/broker`에 raw WebSocket 핸들러를 등록합니다. 전용 필터 체인이 `Authorization: Bearer <Agent 토큰>`을 확인하고 `AgentTokenVerifier`의 검증 결과를 인증 Principal로 전달합니다. 사용자 세션으로 대체할 수 없으며 Agent 인증 결과도 사용자 REST API 권한으로 사용하지 않습니다. 검증 구현 Bean이 없거나 인증에 실패하면 401로 연결을 거부합니다.
 
-Origin은 설정으로 제한하며 Origin 검증은 인증을 대체하지 않습니다. 인증된 연결은 ConnectionRegistry에 등록한 뒤 BROKER_READY를 전송하고, 종료 시 현재 연결만 해제합니다. Agent 온라인 상태 변경과 업무 메시지 라우팅은 아직 제공하지 않습니다. 상세 계약과 남은 연동은 [브로커 인증 계약](broker-authentication.md)을 참고합니다.
+Origin은 설정으로 제한하며 Origin 검증은 인증을 대체하지 않습니다. 인증된 연결은 ConnectionRegistry에 등록한 뒤 BROKER_READY를 전송하고, 종료 시 현재 연결만 해제합니다. AGENT_PRESENCE는 현재 인증된 연결의 Agent에만 반영하며 ONLINE/OFFLINE과 last_seen_at을 DB에 저장합니다. 잘못된 메시지는 1008로 종료하고, 현재 연결 종료 시 오프라인으로 갱신합니다. 업무 메시지 라우팅은 아직 제공하지 않습니다. 상세 계약과 남은 연동은 [브로커 인증 계약](broker-authentication.md)을 참고합니다.
 
 ## 4. 인증 방식 확정 후 결정할 사항
 

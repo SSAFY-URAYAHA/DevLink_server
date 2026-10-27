@@ -2,10 +2,16 @@ package com.devlink.server.handler;
 
 import java.io.IOException;
 import java.util.List;
+import com.devlink.server.common.BusinessException;
+import com.devlink.server.common.ErrorCode;
 import com.devlink.server.domain.AgentPrincipal;
+import com.devlink.server.domain.agent.AgentStatus;
+import com.devlink.server.service.AgentPresenceService;
 import com.devlink.server.realtime.ConnectionRegistry;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.Authentication;
@@ -23,11 +29,14 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 class DevLinkWebSocketHandlerTest {
     private final ConnectionRegistry registry = new ConnectionRegistry();
     private final ObjectMapper mapper = new ObjectMapper();
-    private final DevLinkWebSocketHandler handler = new DevLinkWebSocketHandler(registry, mapper);
+    private final AgentPresenceService presence = mock(AgentPresenceService.class);
+    private final DevLinkWebSocketHandler handler = new DevLinkWebSocketHandler(registry, mapper, presence);
 
     @Test
     void registersVerifiedAgentBeforeSendingReady() throws Exception {
@@ -161,6 +170,94 @@ class DevLinkWebSocketHandlerTest {
         handler.afterConnectionClosed(session, CloseStatus.NORMAL);
 
         assertThat(registry.findByAgentId("11")).isEmpty();
+    }
+
+    @Test
+    void validPresenceUsesAuthenticatedAgentAndDoesNotSendAck() throws Exception {
+        WebSocketSession session = agentSession("conn_001");
+        handler.afterConnectionEstablished(session);
+
+        handler.handleMessage(session, new TextMessage(
+                "{\"type\":\"AGENT_PRESENCE\",\"payload\":{\"status\":\"ONLINE\"}}"));
+
+        verify(presence).updateStatus(new AgentPrincipal(11, 21, 31), session, AgentStatus.ONLINE);
+        verify(session, times(1)).sendMessage(any(TextMessage.class));
+    }
+
+    @Test
+    void staleConnectionCannotUpdatePresence() throws Exception {
+        WebSocketSession previous = agentSession("conn_001");
+        WebSocketSession current = agentSession("conn_002");
+        handler.afterConnectionEstablished(previous);
+        handler.afterConnectionEstablished(current);
+
+        handler.handleMessage(previous, new TextMessage(
+                "{\"type\":\"AGENT_PRESENCE\",\"payload\":{\"status\":\"OFFLINE\"}}"));
+
+        verifyNoInteractions(presence);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "not-json", "", "null", "[]", "{}",
+            "{\"type\":\"AGENT_PRESENCE\",\"payload\":{\"status\":\"ONLINE\"}} true",
+            "{\"type\":\"AGENT_PRESENCE\",\"payload\":{\"status\":\"BUSY\"}}",
+            "{\"type\":\"AGENT_PRESENCE\",\"payload\":{\"status\":null}}",
+            "{\"type\":\"AGENT_PRESENCE\",\"payload\":{\"status\":true}}",
+            "{\"type\":\"AGENT_PRESENCE\",\"payload\":{}}",
+            "{\"type\":\"OTHER\",\"payload\":{\"status\":\"ONLINE\"}}",
+            "{\"type\":\"AGENT_PRESENCE\",\"payload\":{\"status\":\"ONLINE\",\"agent_id\":99}}",
+            "{\"type\":\"AGENT_PRESENCE\",\"agent_id\":99,\"payload\":{\"status\":\"ONLINE\"}}"
+    })
+    void malformedPresenceIsRejectedWithoutUpdatingDatabase(String json) throws Exception {
+        WebSocketSession session = agentSession("conn_001");
+        handler.afterConnectionEstablished(session);
+
+        handler.handleMessage(session, new TextMessage(json));
+
+        verify(session).close(CloseStatus.POLICY_VIOLATION);
+        verifyNoInteractions(presence);
+    }
+
+    @Test
+    void revokedAuthenticationCannotReportPresence() throws Exception {
+        WebSocketSession session = agentSession("conn_001");
+        handler.afterConnectionEstablished(session);
+        ((Authentication) session.getPrincipal()).setAuthenticated(false);
+
+        handler.handleMessage(session, new TextMessage(
+                "{\"type\":\"AGENT_PRESENCE\",\"payload\":{\"status\":\"ONLINE\"}}"));
+
+        verify(session).close(CloseStatus.POLICY_VIOLATION);
+        verifyNoInteractions(presence);
+    }
+
+    @Test
+    void rejectedAgentStateClosesConnection() throws Exception {
+        WebSocketSession session = agentSession("conn_001");
+        handler.afterConnectionEstablished(session);
+        doThrow(new BusinessException(ErrorCode.ACCESS_DENIED)).when(presence)
+                .updateStatus(new AgentPrincipal(11, 21, 31), session, AgentStatus.ONLINE);
+
+        handler.handleMessage(session, new TextMessage(
+                "{\"type\":\"AGENT_PRESENCE\",\"payload\":{\"status\":\"ONLINE\"}}"));
+
+        verify(session).close(CloseStatus.POLICY_VIOLATION);
+    }
+
+    @Test
+    void onlyCurrentCloseTriggersOfflineUpdate() throws Exception {
+        WebSocketSession previous = agentSession("conn_001");
+        WebSocketSession current = agentSession("conn_002");
+        handler.afterConnectionEstablished(previous);
+        handler.afterConnectionEstablished(current);
+
+        handler.afterConnectionClosed(previous, CloseStatus.NORMAL);
+        verifyNoInteractions(presence);
+        handler.afterConnectionClosed(current, CloseStatus.NORMAL);
+        handler.afterConnectionClosed(current, CloseStatus.NORMAL);
+
+        verify(presence, times(1)).markOfflineIfDisconnected(11L);
     }
 
     private WebSocketSession agentSession(String connectionId) {

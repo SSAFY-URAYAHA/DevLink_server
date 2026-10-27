@@ -1,8 +1,14 @@
 package com.devlink.server.handler;
 
 import java.util.Map;
+import com.devlink.server.common.BusinessException;
 import com.devlink.server.domain.AgentPrincipal;
+import com.devlink.server.domain.agent.AgentStatus;
 import com.devlink.server.realtime.ConnectionRegistry;
+import com.devlink.server.service.AgentPresenceService;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.security.core.Authentication;
 import org.springframework.stereotype.Component;
@@ -11,20 +17,18 @@ import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 
-/**
- * 브로커의 WebSocket 연결 성공과 종료를 처리한다.
- * 연결 성공: 인증된 Agent 확인 → Registry 등록 → BROKER_READY 전송.
- * 연결 종료: 종료된 세션이 현재 연결일 때만 Registry에서 제거.
- * 여기서 관리하는 것은 서버와 브로커의 연결이며, Agent의 ONLINE/OFFLINE 상태는 별도 처리한다.
- */
+/** 브로커의 연결 수명과 AGENT_PRESENCE 보고를 처리한다. */
 @Component
 public class DevLinkWebSocketHandler extends TextWebSocketHandler {
     private final ConnectionRegistry connectionRegistry;
     private final ObjectMapper objectMapper;
+    private final AgentPresenceService agentPresenceService;
 
-    public DevLinkWebSocketHandler(ConnectionRegistry connectionRegistry, ObjectMapper objectMapper) {
+    public DevLinkWebSocketHandler(ConnectionRegistry connectionRegistry, ObjectMapper objectMapper,
+            AgentPresenceService agentPresenceService) {
         this.connectionRegistry = connectionRegistry;
         this.objectMapper = objectMapper;
+        this.agentPresenceService = agentPresenceService;
     }
 
     /** 인증 필터를 통과하고 WebSocket 연결이 성립하면 Spring이 호출한다. */
@@ -44,14 +48,18 @@ public class DevLinkWebSocketHandler extends TextWebSocketHandler {
             if (!connectionRegistry.isCurrentConnection(agentId, session)) {
                 return;
             }
-            // 브로커에 전달할 최소 응답을 구성
+            // READY는 브로커 연결 준비 완료이며 Agent의 ONLINE 보고와는 별개다.
             var ready = Map.of(
                     "type", "BROKER_READY",
                     "payload", Map.of("connection_id", session.getId(), "agent_id", agent.agentId()));
             session.sendMessage(new TextMessage(objectMapper.writeValueAsString(ready)));
         } catch (Exception exception) {
-            // 등록 또는 READY 전송 중 실패하면 사용할 수 없는 연결 정보가 남지 않게 정리
-            connectionRegistry.unregister(agentId, session);
+            // 정리 중 DB 오류가 발생해도 최초 오류를 보존하고 소켓 종료까지 시도한다.
+            try {
+                unregisterAndMarkOffline(agent, session);
+            } catch (Exception cleanupException) {
+                exception.addSuppressed(cleanupException);
+            }
             try {
                 if (session.isOpen()) {
                     session.close(CloseStatus.SERVER_ERROR);
@@ -63,12 +71,61 @@ public class DevLinkWebSocketHandler extends TextWebSocketHandler {
         }
     }
 
-    /** 연결 종료가 감지되면 Spring이 호출한다. 정상 종료와 비정상 종료 모두 정리 대상이다. */
+    @Override
+    protected void handleTextMessage(WebSocketSession session, TextMessage message) throws Exception {
+        if (!(session.getPrincipal() instanceof Authentication authentication)
+                || !authentication.isAuthenticated()
+                || !(authentication.getPrincipal() instanceof AgentPrincipal agent)) {
+            session.close(CloseStatus.POLICY_VIOLATION);
+            return;
+        }
+        // 교체된 옛 연결에서 늦게 도착한 메시지는 DB에 반영하지 않는다.
+        if (!connectionRegistry.isCurrentConnection(agent.getName(), session)) {
+            return;
+        }
+
+        AgentStatus status;
+        try {
+            status = readPresenceStatus(message.getPayload());
+        } catch (JsonProcessingException | IllegalArgumentException exception) {
+            session.close(CloseStatus.POLICY_VIOLATION);
+            return;
+        }
+        try {
+            // Agent ID는 메시지 본문이 아니라 인증 정보에서 가져온다. 별도 ACK는 보내지 않는다.
+            agentPresenceService.updateStatus(agent, session, status);
+        } catch (BusinessException exception) {
+            session.close(CloseStatus.POLICY_VIOLATION);
+        }
+    }
+
+    /** 정상·비정상 종료 모두 현재 연결을 제거하고 해당 Agent를 오프라인 처리한다. */
     @Override
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
+        // 연결 중 인증이 비활성화됐더라도 기존 인증 신원으로 종료 처리는 수행한다.
         if (session.getPrincipal() instanceof Authentication authentication
                 && authentication.getPrincipal() instanceof AgentPrincipal agent) {
-            connectionRegistry.unregister(agent.getName(), session);
+            unregisterAndMarkOffline(agent, session);
         }
+    }
+
+    private void unregisterAndMarkOffline(AgentPrincipal agent, WebSocketSession session) {
+        // 옛 연결의 종료 콜백이면 false이므로 새 연결의 상태를 변경하지 않는다.
+        if (connectionRegistry.unregister(agent.getName(), session)) {
+            agentPresenceService.markOfflineIfDisconnected(agent.agentId());
+        }
+    }
+
+    private AgentStatus readPresenceStatus(String payload) throws JsonProcessingException {
+        JsonNode event = objectMapper.reader()
+                .with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).readTree(payload);
+        if (event == null || !event.isObject() || event.size() != 2
+                || !event.path("type").isTextual()
+                || !"AGENT_PRESENCE".equals(event.path("type").textValue())
+                || !event.path("payload").isObject() || event.path("payload").size() != 1
+                || !event.path("payload").path("status").isTextual()) {
+            throw new IllegalArgumentException("Invalid AGENT_PRESENCE message");
+        }
+        return AgentStatus.valueOf(event.path("payload").path("status").textValue());
     }
 }

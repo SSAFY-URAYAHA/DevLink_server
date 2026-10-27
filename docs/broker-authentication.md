@@ -51,6 +51,26 @@ Optional<AgentPrincipal> verify(String rawToken);
 
 READY는 브로커 연결 준비 완료를 의미한다. 이를 보냈다는 이유로 DB의 Agent 상태를 ONLINE으로 변경하지 않는다. 현재 Registry의 조회 키는 `AgentPrincipal.getName()`으로 얻은 Agent ID 문자열이다.
 
+## AGENT_PRESENCE 수신
+
+브로커는 READY 수신 직후, Agent 연결·종료 시, 서버 재접속 후 READY를 다시 받았을 때 현재 Agent 상태를 보낸다. 주기 보고와 별도 ACK는 없다.
+
+```json
+{
+  "type": "AGENT_PRESENCE",
+  "payload": { "status": "ONLINE" }
+}
+```
+
+- 허용 상태는 대문자 `ONLINE`, `OFFLINE`이다. 현재 수신 스키마는 최상위 `type`, `payload`와 payload의 `status`만 허용한다.
+- Agent ID는 인증된 연결에서 가져온다. 본문에 임의 Agent ID·시각 등을 추가하는 메시지와 잘못된 JSON·타입·상태는 1008로 종료한다.
+- 현재 활성 연결인지 확인하고, DB 행 잠금 획득 후 다시 확인해 옛 연결의 지연 메시지를 반영하지 않는다.
+- ONLINE은 DB의 status와 서버 현재 시각의 last_seen_at을 갱신한다. OFFLINE은 status만 갱신하고 last_seen_at은 유지한다.
+- DB의 소유자·팀이 인증 정보와 다르거나 Agent가 없으면 연결을 거절한다.
+- 현재 연결 종료 시 Registry를 해제하고 OFFLINE으로 갱신한다. 제거 직후 새 연결이 생긴 경우를 DB 잠금 후 재확인해 새 접속 상태를 덮어쓰지 않는다.
+- READY 전송만으로 ONLINE으로 변경하지 않는다. OFFLINE 보고만으로 브로커 연결을 종료하지 않는다.
+- 온라인 전달 가능 여부를 DB 상태만으로 판단하지 않는다. Registry의 현재 열린 연결도 함께 확인해야 한다.
+
 ## 연결 수명과 후속 작업
 
 - 토큰 재발급·폐기·Agent 삭제 시 열린 연결을 종료하는 연동 방식은 인증 담당자와 추가 합의한다.
@@ -58,7 +78,7 @@ READY는 브로커 연결 준비 완료를 의미한다. 이를 보냈다는 이
 - 연결 성공 시 인증된 `AgentPrincipal`의 Agent ID로 `ConnectionRegistry`에 등록하고 `BROKER_READY`를 전송한다.
 - 동일 Agent의 새 연결은 기존 연결을 4002 코드로 종료한다. 이전 연결의 종료 콜백은 새 연결을 제거하지 않는다.
 - 연결 종료 시 현재 연결만 Registry에서 해제한다. READY 전송 실패도 등록을 정리하고 연결을 종료한다.
-- Agent presence, 하트비트, 작업 라우팅, ACK와 메시지별 권한 검사는 이후 구현한다.
+- AGENT_PRESENCE 수신·상태 저장·현재 연결 검증은 구현했다. 하트비트, 작업 라우팅, ACK와 추가 메시지별 권한 검사는 이후 구현한다.
 - Agent 등록·토큰 발급이 브로커 연결보다 먼저 가능하도록 CLI·인증 담당자와 초기 설정 흐름을 맞춘다.
 - `owner_user_id`의 고유 제약 등 사용자당 Agent 하나를 보장하는 DB 변경은 스키마 담당자가 반영한다.
 
