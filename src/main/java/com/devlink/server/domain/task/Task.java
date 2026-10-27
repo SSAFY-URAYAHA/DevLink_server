@@ -1,0 +1,128 @@
+package com.devlink.server.domain.task;
+
+import java.time.LocalDateTime;
+import jakarta.persistence.*;
+import lombok.AccessLevel;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+
+// Bounded context: task.
+@Entity
+@Table(name = "tasks", uniqueConstraints = @UniqueConstraint(name = "uk_tasks_request_key", columnNames = {"requester_user_id", "request_key"}))
+@Getter
+@NoArgsConstructor(access = AccessLevel.PROTECTED)
+public class Task {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    @Column(name = "id", length = 255, nullable = false)
+    private Long id;
+
+    @Column(name = "request_key", length = 64, nullable = false)
+    private String requestKey;
+
+    @Column(name = "team_id", length = 255, nullable = false)
+    private Long teamId;
+
+    @Column(name = "requester_agent_id", length = 255, nullable = false)
+    private Long requesterAgentId;
+
+    @Column(name = "requester_user_id", length = 255, nullable = false)
+    private Long requesterUserId;
+
+    @Column(name = "receiver_agent_id", length = 255, nullable = false)
+    private Long receiverAgentId;
+
+    @Column(name = "prompt", length = 255, nullable = false, columnDefinition = "TEXT")
+    private String prompt;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "status", length = 20, nullable = false)
+    private TaskStatus status;
+
+    @Column(name = "result_text", length = 255, nullable = true, columnDefinition = "TEXT")
+    private String resultText;
+
+    @Column(name = "partially_modified", length = 255, nullable = false)
+    private boolean partiallyModified;
+
+    @Version
+    @Column(name = "version", length = 255, nullable = false)
+    private Long version;
+
+    @Column(name = "created_at", length = 255, nullable = false)
+    private LocalDateTime createdAt;
+
+    @Column(name = "delivered_at", length = 255, nullable = true)
+    private LocalDateTime deliveredAt;
+
+    @Column(name = "started_at", length = 255, nullable = true)
+    private LocalDateTime startedAt;
+
+    @Column(name = "completed_at", length = 255, nullable = true)
+    private LocalDateTime completedAt;
+
+    public static Task create(String requestKey, Long teamId, Long requesterAgentId, Long requesterUserId, Long receiverAgentId, String prompt) {
+        requireValue(requestKey, "requestKey");
+        requireValue(teamId, "teamId");
+        requireValue(requesterAgentId, "requesterAgentId");
+        requireValue(requesterUserId, "requesterUserId");
+        requireValue(receiverAgentId, "receiverAgentId");
+        requireValue(prompt, "prompt");
+        Task entity = new Task();
+        entity.requestKey = requestKey;
+        entity.teamId = teamId;
+        entity.requesterAgentId = requesterAgentId;
+        entity.requesterUserId = requesterUserId;
+        entity.receiverAgentId = receiverAgentId;
+        entity.prompt = prompt;
+        entity.status = TaskStatus.PENDING;
+        return entity;
+    }
+
+    public void markDelivered(LocalDateTime at) {
+        requireValue(at, "deliveredAt");
+        this.deliveredAt = at;
+    }
+
+    public void accept(Long agentId) {
+        requireReceiverAndStatus(agentId, TaskStatus.PENDING);
+        this.status = TaskStatus.IN_PROGRESS;
+        this.startedAt = LocalDateTime.now();
+    }
+
+    /** The caller must save task status and result files in one service transaction. */
+    public void complete(Long agentId, String resultText) {
+        requireReceiverAndStatus(agentId, TaskStatus.IN_PROGRESS);
+        this.status = TaskStatus.COMPLETED;
+        this.resultText = resultText;
+        this.completedAt = LocalDateTime.now();
+    }
+
+    public void fail(Long agentId, String reason, boolean partiallyModified) {
+        requireReceiverAndStatus(agentId, TaskStatus.IN_PROGRESS);
+        this.status = TaskStatus.FAILED;
+        this.resultText = reason;
+        this.partiallyModified = partiallyModified;
+        this.completedAt = LocalDateTime.now();
+    }
+
+    private void requireReceiverAndStatus(Long agentId, TaskStatus expected) {
+        if (!receiverAgentId.equals(agentId)) {
+            throw new IllegalArgumentException("Only the receiver agent can change task status");
+        }
+        if (status != expected) {
+            throw new IllegalStateException("Expected " + expected + " but task is " + status);
+        }
+    }
+
+    @PrePersist
+    private void initializeTimestamp() {
+        this.createdAt = LocalDateTime.now();
+    }
+
+    private static void requireValue(Object value, String field) {
+        if (value == null || (value instanceof String text && text.isBlank())) {
+            throw new IllegalArgumentException(field + " must not be null or blank");
+        }
+    }
+}
