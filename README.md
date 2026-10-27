@@ -65,7 +65,7 @@ prod 프로필은 기본값 없이 작업 디렉터리의 `.env` 또는 환경 �
 
 ## 4. 패키지 구조
 
-루트 패키지 `com.devlink.server`, 계층별 패키지이며 도메인별 하위 패키지는 만들지 않습니다.
+루트 패키지는 `com.devlink.server`이며, `domain`은 엔티티별 하위 패키지로 구성합니다.
 
 | 패키지 | 역할 |
 | --- | --- |
@@ -80,6 +80,32 @@ prod 프로필은 기본값 없이 작업 디렉터리의 `.env` 또는 환경 �
 | service | 비즈니스 로직과 트랜잭션 |
 
 클래스 이름은 기능명 접두사를 씁니다: `AuthController`, `TeamService`, `AgentRepository`, `TaskCreateRequest`.
+
+```text
+domain/
+├── user/
+│   └── User.java
+├── team/
+│   └── Team.java
+├── teammember/
+│   ├── TeamMember.java
+│   └── MemberRole.java
+├── agent/
+│   ├── Agent.java
+│   ├── AgentStatus.java
+│   └── ToolType.java
+├── task/
+│   ├── Task.java
+│   └── TaskStatus.java
+├── taskfile/
+│   ├── TaskFile.java
+│   └── ChangeType.java
+└── taskevent/
+    ├── TaskEvent.java
+    └── TaskEventType.java
+```
+
+각 엔티티와 해당 엔티티에서 사용하는 enum을 같은 패키지에 배치하고, 리포지토리는 `com.devlink.server.repository`에서 관리합니다.
 
 ## 5. 마이그레이션 규칙
 
