@@ -8,6 +8,9 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -17,6 +20,16 @@ class DevLinkServerIntegrationTest extends AbstractIntegrationTest {
     @Autowired private Flyway flyway;
     @Autowired private JdbcTemplate jdbc;
     @Autowired private EntityManagerFactory entityManagerFactory;
+
+    @Test
+    void brokerConnectionFailsClosedWithoutTokenVerificationImplementation() {
+        var headers = new HttpHeaders();
+        headers.setBearerAuth("unverified-agent-token");
+        var response = rest.exchange("/ws/broker", HttpMethod.GET,
+                new HttpEntity<>(headers), JsonNode.class);
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+        assertThat(response.getBody().path("code").asText()).isEqualTo("AUTHENTICATION_REQUIRED");
+    }
 
     @Test
     void contextHealthAndSecurityWorkWithoutSchemaOrEntities() {
