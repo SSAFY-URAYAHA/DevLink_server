@@ -48,13 +48,12 @@ public class DevLinkWebSocketHandler extends TextWebSocketHandler {
             if (!connectionRegistry.isCurrentConnection(agentId, session)) {
                 return;
             }
-            // READY는 브로커 연결 준비 완료이며 Agent의 ONLINE 보고와는 별개다.
             var ready = Map.of(
                     "type", "BROKER_READY",
                     "payload", Map.of("connection_id", session.getId(), "agent_id", agent.agentId()));
             session.sendMessage(new TextMessage(objectMapper.writeValueAsString(ready)));
         } catch (Exception exception) {
-            // 정리 중 DB 오류가 발생해도 최초 오류를 보존하고 소켓 종료까지 시도한다.
+            // 정리 중 DB 오류가 발생해도 최초 오류를 보존하고 소켓 종료까지 시도
             try {
                 unregisterAndMarkOffline(agent, session);
             } catch (Exception cleanupException) {
@@ -79,7 +78,6 @@ public class DevLinkWebSocketHandler extends TextWebSocketHandler {
             session.close(CloseStatus.POLICY_VIOLATION);
             return;
         }
-        // 교체된 옛 연결에서 늦게 도착한 메시지는 DB에 반영하지 않는다.
         if (!connectionRegistry.isCurrentConnection(agent.getName(), session)) {
             return;
         }
@@ -92,7 +90,6 @@ public class DevLinkWebSocketHandler extends TextWebSocketHandler {
             return;
         }
         try {
-            // Agent ID는 메시지 본문이 아니라 인증 정보에서 가져온다. 별도 ACK는 보내지 않는다.
             agentPresenceService.updateStatus(agent, session, status);
         } catch (BusinessException exception) {
             session.close(CloseStatus.POLICY_VIOLATION);
@@ -102,7 +99,7 @@ public class DevLinkWebSocketHandler extends TextWebSocketHandler {
     /** 정상·비정상 종료 모두 현재 연결을 제거하고 해당 Agent를 오프라인 처리한다. */
     @Override
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
-        // 연결 중 인증이 비활성화됐더라도 기존 인증 신원으로 종료 처리는 수행한다.
+        // 연결 중 인증이 비활성화됐더라도 기존 인증 신원으로 종료 처리는 수행
         if (session.getPrincipal() instanceof Authentication authentication
                 && authentication.getPrincipal() instanceof AgentPrincipal agent) {
             unregisterAndMarkOffline(agent, session);
@@ -110,7 +107,6 @@ public class DevLinkWebSocketHandler extends TextWebSocketHandler {
     }
 
     private void unregisterAndMarkOffline(AgentPrincipal agent, WebSocketSession session) {
-        // 옛 연결의 종료 콜백이면 false이므로 새 연결의 상태를 변경하지 않는다.
         if (connectionRegistry.unregister(agent.getName(), session)) {
             agentPresenceService.markOfflineIfDisconnected(agent.agentId());
         }
