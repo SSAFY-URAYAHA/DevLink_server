@@ -8,6 +8,7 @@ import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.function.LongSupplier;
+import java.util.function.BooleanSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -70,6 +71,23 @@ public class ConnectionRegistry {
         Assert.notNull(session, "session must not be null");
         ConnectionState current = connections.get(agentId);
         return current != null && current.session() == session && session.isOpen();
+    }
+
+    /** 현재 연결 확인과 짧은 메모리 작업을 하나로 처리해, 확인 직후 연결이 바뀌는 틈을 막는다. */
+    public boolean executeIfCurrent(String agentId, WebSocketSession session, BooleanSupplier action) {
+        Assert.hasText(agentId, "agentId must not be blank");
+        Assert.notNull(session, "session must not be null");
+        Assert.notNull(action, "action must not be null");
+        boolean[] executed = {false};
+        connections.computeIfPresent(agentId, (key, current) -> {
+            if (current.session() == session && session.isOpen()) {
+                // 이 안에서는 ACK 대기 제거 같은 메모리 작업만 수행
+                // 소켓 전송·결과 이벤트 통지·DB 접근은 맵 잠금 밖에서 수행
+                executed[0] = action.getAsBoolean();
+            }
+            return current;
+        });
+        return executed[0];
     }
 
     /** 현재 연결의 유효한 JSON PING만 감시 시간을 연장한다. Agent 상태는 변경하지 않는다. */

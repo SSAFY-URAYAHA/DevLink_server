@@ -21,13 +21,16 @@ public class BrokerHeartbeatService {
     private final ConnectionRegistry connections;
     private final AgentPresenceService presence;
     private final Duration timeout;
+    private final TaskAckService acknowledgements;
 
     public BrokerHeartbeatService(ConnectionRegistry connections, AgentPresenceService presence,
-            @Value("${devlink.broker.heartbeat-timeout-ms:40000}") long timeoutMillis) {
+            @Value("${devlink.broker.heartbeat-timeout-ms:40000}") long timeoutMillis,
+            TaskAckService acknowledgements) {
         Assert.isTrue(timeoutMillis > 0, "heartbeat timeout must be positive");
         this.connections = connections;
         this.presence = presence;
         this.timeout = Duration.ofMillis(timeoutMillis);
+        this.acknowledgements = acknowledgements;
     }
 
     /** 기본 1초 간격으로 검사하므로 40초 무수신 이후 다음 검사에서 정리한다. */
@@ -35,6 +38,8 @@ public class BrokerHeartbeatService {
     public void checkTimeouts() {
         for (var expired : connections.removeExpiredConnections(timeout)) {
             var session = expired.session();
+            // 소켓 종료 자체가 실패해도 이미 만료된 연결의 ACK 대기는 즉시 해제
+            acknowledgements.connectionClosed(session);
             try {
                 if (session.isOpen()) {
                     session.close(HEARTBEAT_TIMEOUT);

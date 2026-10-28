@@ -7,6 +7,9 @@ import com.devlink.server.common.ErrorCode;
 import com.devlink.server.domain.AgentPrincipal;
 import com.devlink.server.domain.agent.AgentStatus;
 import com.devlink.server.service.AgentPresenceService;
+import com.devlink.server.service.TaskAckService;
+import com.devlink.server.dto.TaskAckResult;
+import org.springframework.context.ApplicationEventPublisher;
 import com.devlink.server.realtime.ConnectionRegistry;
 import com.devlink.server.realtime.BrokerMessageSender;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -37,8 +40,69 @@ class DevLinkWebSocketHandlerTest {
     private final ConnectionRegistry registry = new ConnectionRegistry();
     private final ObjectMapper mapper = new ObjectMapper();
     private final AgentPresenceService presence = mock(AgentPresenceService.class);
+    private final TaskAckService acknowledgements = new TaskAckService(
+            registry, mock(ApplicationEventPublisher.class), 5000);
     private final DevLinkWebSocketHandler handler = new DevLinkWebSocketHandler(
-            registry, mapper, presence, new BrokerMessageSender(registry, mapper));
+            registry, mapper, presence, new BrokerMessageSender(registry, mapper), acknowledgements);
+
+    @Test
+    void validAckUsesAuthenticatedSessionAndDoesNotChangePresenceOrReply() throws Exception {
+        WebSocketSession session = agentSession("conn_001");
+        handler.afterConnectionEstablished(session);
+        var result = acknowledgements.register(7, "event-1", new AgentPrincipal(11, 21, 31), session)
+                .toCompletableFuture();
+
+        handler.handleMessage(session, new TextMessage(
+                "{\"type\":\"ACK\",\"payload\":{\"event_id\":\"event-1\",\"task_id\":7}}"));
+
+        assertThat(result.join().status()).isEqualTo(TaskAckResult.Status.ACKNOWLEDGED);
+        verify(session, times(1)).sendMessage(any(TextMessage.class));
+        verifyNoInteractions(presence);
+    }
+
+    @Test
+    void unknownAndDuplicateAcksDoNotCloseConnection() throws Exception {
+        WebSocketSession session = agentSession("conn_001");
+        handler.afterConnectionEstablished(session);
+        acknowledgements.register(7, "event-1", new AgentPrincipal(11, 21, 31), session);
+        for (String eventId : List.of("event-1", "event-1", "unknown")) {
+            handler.handleMessage(session, new TextMessage(
+                    "{\"type\":\"ACK\",\"payload\":{\"event_id\":\"" + eventId + "\",\"task_id\":7}}"));
+        }
+
+        verify(session, never()).close(any(CloseStatus.class));
+        verifyNoInteractions(presence);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "{}", "{\"event_id\":\"e\"}", "{\"event_id\":1,\"task_id\":7}",
+            "{\"event_id\":\" \",\"task_id\":7}", "{\"event_id\":\"e\",\"task_id\":0}",
+            "{\"event_id\":\"e\",\"task_id\":\"7\"}", "{\"event_id\":\"e\",\"task_id\":7.5}",
+            "{\"event_id\":\"e\",\"task_id\":9223372036854775808}",
+            "{\"event_id\":\"e\",\"task_id\":7,\"agent_id\":99}"
+    })
+    void malformedAckIsRejected(String payload) throws Exception {
+        WebSocketSession session = agentSession("conn_001");
+        handler.afterConnectionEstablished(session);
+
+        handler.handleMessage(session, new TextMessage("{\"type\":\"ACK\",\"payload\":" + payload + "}"));
+
+        verify(session).close(CloseStatus.POLICY_VIOLATION);
+        verifyNoInteractions(presence);
+    }
+
+    @Test
+    void closingConnectionReleasesItsAckWaitImmediately() throws Exception {
+        WebSocketSession session = agentSession("conn_001");
+        handler.afterConnectionEstablished(session);
+        var result = acknowledgements.register(7, "event-1", new AgentPrincipal(11, 21, 31), session)
+                .toCompletableFuture();
+
+        handler.afterConnectionClosed(session, CloseStatus.NORMAL);
+
+        assertThat(result.join().status()).isEqualTo(TaskAckResult.Status.CONNECTION_CLOSED);
+    }
 
     @Test
     void pingRepliesWithMatchingPongWithoutChangingAgentPresence() throws Exception {
