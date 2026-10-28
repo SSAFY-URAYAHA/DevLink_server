@@ -8,6 +8,7 @@ import com.devlink.server.domain.AgentPrincipal;
 import com.devlink.server.domain.agent.AgentStatus;
 import com.devlink.server.service.AgentPresenceService;
 import com.devlink.server.realtime.ConnectionRegistry;
+import com.devlink.server.realtime.BrokerMessageSender;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -36,7 +37,87 @@ class DevLinkWebSocketHandlerTest {
     private final ConnectionRegistry registry = new ConnectionRegistry();
     private final ObjectMapper mapper = new ObjectMapper();
     private final AgentPresenceService presence = mock(AgentPresenceService.class);
-    private final DevLinkWebSocketHandler handler = new DevLinkWebSocketHandler(registry, mapper, presence);
+    private final DevLinkWebSocketHandler handler = new DevLinkWebSocketHandler(
+            registry, mapper, presence, new BrokerMessageSender(registry, mapper));
+
+    @Test
+    void pingRepliesWithMatchingPongWithoutChangingAgentPresence() throws Exception {
+        WebSocketSession session = agentSession("conn_001");
+        handler.afterConnectionEstablished(session);
+
+        handler.handleMessage(session, new TextMessage(
+                "{\"type\":\"HEARTBEAT\",\"payload\":{\"kind\":\"PING\",\"ping_id\":\"ping-1\"}}"));
+
+        var messages = ArgumentCaptor.forClass(TextMessage.class);
+        verify(session, times(2)).sendMessage(messages.capture());
+        assertThat(mapper.readTree(messages.getAllValues().get(1).getPayload()))
+                .isEqualTo(mapper.readTree(
+                        "{\"type\":\"HEARTBEAT\",\"payload\":{\"kind\":\"PONG\",\"ping_id\":\"ping-1\"}}"));
+        verifyNoInteractions(presence);
+    }
+
+    @Test
+    void oldConnectionPingIsIgnoredAfterReconnect() throws Exception {
+        WebSocketSession previous = agentSession("conn_001");
+        WebSocketSession current = agentSession("conn_002");
+        handler.afterConnectionEstablished(previous);
+        handler.afterConnectionEstablished(current);
+
+        handler.handleMessage(previous, new TextMessage(
+                "{\"type\":\"HEARTBEAT\",\"payload\":{\"kind\":\"PING\",\"ping_id\":\"old\"}}"));
+
+        verify(previous, times(1)).sendMessage(any(TextMessage.class));
+        assertThat(registry.findByAgentId("11")).contains(current);
+        verifyNoInteractions(presence);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "{\"kind\":\"PONG\",\"ping_id\":\"1\"}",
+            "{\"kind\":\"PING\"}",
+            "{\"kind\":\"PING\",\"ping_id\":1}",
+            "{\"kind\":\"PING\",\"ping_id\":\" \"}",
+            "{\"kind\":\"PING\",\"ping_id\":\"1\",\"agent_id\":99}"
+    })
+    void malformedHeartbeatIsRejected(String payload) throws Exception {
+        WebSocketSession session = agentSession("conn_001");
+        handler.afterConnectionEstablished(session);
+
+        handler.handleMessage(session, new TextMessage("{\"type\":\"HEARTBEAT\",\"payload\":" + payload + "}"));
+
+        verify(session).close(CloseStatus.POLICY_VIOLATION);
+        verify(session, times(1)).sendMessage(any(TextMessage.class));
+        verifyNoInteractions(presence);
+    }
+
+    @Test
+    void failedPongImmediatelyCleansUpCurrentConnection() throws Exception {
+        WebSocketSession session = agentSession("conn_001");
+        handler.afterConnectionEstablished(session);
+        IOException failure = new IOException("Pong send failed");
+        doThrow(failure).when(session).sendMessage(any(TextMessage.class));
+
+        assertThatThrownBy(() -> handler.handleMessage(session, new TextMessage(
+                "{\"type\":\"HEARTBEAT\",\"payload\":{\"kind\":\"PING\",\"ping_id\":\"1\"}}")))
+                .isSameAs(failure);
+
+        assertThat(registry.findByAgentId("11")).isEmpty();
+        verify(session).close(CloseStatus.SERVER_ERROR);
+        verify(presence).markOfflineIfDisconnected(11L);
+    }
+
+    @Test
+    void transportErrorCleansUpWithoutWaitingForCloseCallbackEvenIfCloseFails() throws Exception {
+        WebSocketSession session = agentSession("conn_001");
+        handler.afterConnectionEstablished(session);
+        doThrow(new IOException("Close failed")).when(session).close(CloseStatus.SERVER_ERROR);
+
+        assertThatThrownBy(() -> handler.handleTransportError(session, new IOException("Lost connection")))
+                .isInstanceOf(IOException.class);
+
+        assertThat(registry.findByAgentId("11")).isEmpty();
+        verify(presence).markOfflineIfDisconnected(11L);
+    }
 
     @Test
     void registersVerifiedAgentBeforeSendingReady() throws Exception {
