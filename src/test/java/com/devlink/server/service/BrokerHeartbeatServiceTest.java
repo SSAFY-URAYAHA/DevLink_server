@@ -27,7 +27,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 class BrokerHeartbeatServiceTest {
     private final ConnectionRegistry connections = mock(ConnectionRegistry.class);
     private final AgentPresenceService presence = mock(AgentPresenceService.class);
-    private final BrokerHeartbeatService heartbeat = new BrokerHeartbeatService(connections, presence, 40000);
+    private final TaskAckService acknowledgements = mock(TaskAckService.class);
+    private final BrokerHeartbeatService heartbeat = new BrokerHeartbeatService(
+            connections, presence, 40000, acknowledgements);
 
     @Test
     void timeoutClosesSocketAndChecksOfflineStateEvenWhenCloseFails() throws Exception {
@@ -54,7 +56,8 @@ class BrokerHeartbeatServiceTest {
         ConnectionRegistry realConnections = new ConnectionRegistry();
         AgentRepository agents = mock(AgentRepository.class);
         AgentPresenceService realPresence = new AgentPresenceService(agents, realConnections);
-        BrokerHeartbeatService service = new BrokerHeartbeatService(connections, realPresence, 40000);
+        BrokerHeartbeatService service = new BrokerHeartbeatService(
+                connections, realPresence, 40000, acknowledgements);
         WebSocketSession previous = session(11);
         WebSocketSession current = session(11);
         Agent agent = Agent.create(31L, 21L, "Codex", null, ToolType.CODEX, "server");

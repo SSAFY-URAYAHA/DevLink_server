@@ -12,6 +12,7 @@ import com.devlink.server.domain.agent.ToolType;
 import com.devlink.server.domain.task.Task;
 import com.devlink.server.domain.task.TaskStatus;
 import com.devlink.server.dto.TaskRoutingResult.Status;
+import com.devlink.server.dto.TaskAckResult;
 import com.devlink.server.realtime.BrokerMessageSender;
 import com.devlink.server.realtime.ConnectionRegistry;
 import com.devlink.server.repository.AgentRepository;
@@ -22,6 +23,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.TextMessage;
@@ -45,7 +47,10 @@ class TaskRoutingServiceTest {
     private final ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
     private final AgentPresenceService presence = mock(AgentPresenceService.class);
     private final BrokerMessageSender sender = new BrokerMessageSender(connections, mapper);
-    private final TaskRoutingService routing = new TaskRoutingService(tasks, agents, connections, sender, presence);
+    private final ApplicationEventPublisher ackEvents = mock(ApplicationEventPublisher.class);
+    private final TaskAckService acknowledgements = new TaskAckService(connections, ackEvents, 5000);
+    private final TaskRoutingService routing = new TaskRoutingService(
+            tasks, agents, connections, sender, presence, acknowledgements);
     private final Task task = Task.create("request-key", 31L, 1L, 20L, 2L, "파일을 수정해 주세요");
     private final Agent receiver = Agent.create(31L, 21L, "Receiver", null, ToolType.CODEX, "server");
 
@@ -56,6 +61,24 @@ class TaskRoutingServiceTest {
         receiver.markOnline(LocalDateTime.now());
         when(tasks.findById(7L)).thenReturn(Optional.of(task));
         when(agents.findById(2L)).thenReturn(Optional.of(receiver));
+    }
+
+    @Test
+    void ackArrivingInsideSocketWriteIsAlreadyRegistered() throws Exception {
+        WebSocketSession session = registerSession();
+        doAnswer(invocation -> {
+            var event = mapper.readTree(((TextMessage) invocation.getArgument(0)).getPayload());
+            assertThat(acknowledgements.acknowledge(new AgentPrincipal(2, 21, 31), session, 7,
+                    event.path("event_id").asText())).isTrue();
+            return null;
+        }).when(session).sendMessage(any());
+
+        assertThat(routing.sendTask(7L).status()).isEqualTo(Status.SENT);
+
+        var result = ArgumentCaptor.forClass(TaskAckResult.class);
+        verify(ackEvents).publishEvent(result.capture());
+        assertThat(result.getValue().status()).isEqualTo(TaskAckResult.Status.ACKNOWLEDGED);
+        assertThat(task.getDeliveredAt()).isNull();
     }
 
     @Test
@@ -188,12 +211,14 @@ class TaskRoutingServiceTest {
         WebSocketSession current = session("replacement");
         BrokerMessageSender replacingSender = new BrokerMessageSender(connections, mapper) {
             @Override
-            public boolean sendIfCurrent(String agentId, WebSocketSession session, Object event) throws IOException {
+            public boolean sendIfCurrent(String agentId, WebSocketSession session, Object event, Runnable beforeSend)
+                    throws IOException {
                 connections.register(agentId, current);
-                return super.sendIfCurrent(agentId, session, event);
+                return super.sendIfCurrent(agentId, session, event, beforeSend);
             }
         };
-        TaskRoutingService service = new TaskRoutingService(tasks, agents, connections, replacingSender, presence);
+        TaskRoutingService service = new TaskRoutingService(
+                tasks, agents, connections, replacingSender, presence, acknowledgements);
 
         assertThat(service.sendTask(7L).status()).isEqualTo(Status.CONNECTION_REPLACED);
 

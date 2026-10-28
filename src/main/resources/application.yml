@@ -4,6 +4,9 @@ devlink:
     broker:
         heartbeat-timeout-ms: 40000
         heartbeat-check-interval-ms: 1000
+        # ACK 대기는 실제 소켓 전송 직전부터 최대 5초이며, 100ms 간격으로 만료를 확인한다.
+        ack-timeout-ms: 5000
+        ack-check-interval-ms: 100
 spring:
     application:
         name: devlink-server
