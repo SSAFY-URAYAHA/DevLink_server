@@ -7,6 +7,7 @@ import com.devlink.server.domain.agent.AgentStatus;
 import com.devlink.server.realtime.BrokerMessageSender;
 import com.devlink.server.realtime.ConnectionRegistry;
 import com.devlink.server.service.AgentPresenceService;
+import com.devlink.server.service.TaskAckService;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -18,20 +19,22 @@ import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 
-/** 브로커의 연결 수명, AGENT_PRESENCE 보고, JSON 하트비트를 처리한다. */
+/** 브로커의 연결 수명, AGENT_PRESENCE 보고, JSON 하트비트와 ACK를 처리한다. */
 @Component
 public class DevLinkWebSocketHandler extends TextWebSocketHandler {
     private final ConnectionRegistry connectionRegistry;
     private final ObjectMapper objectMapper;
     private final AgentPresenceService agentPresenceService;
     private final BrokerMessageSender sender;
+    private final TaskAckService acknowledgements;
 
     public DevLinkWebSocketHandler(ConnectionRegistry connectionRegistry, ObjectMapper objectMapper,
-            AgentPresenceService agentPresenceService, BrokerMessageSender sender) {
+            AgentPresenceService agentPresenceService, BrokerMessageSender sender, TaskAckService acknowledgements) {
         this.connectionRegistry = connectionRegistry;
         this.objectMapper = objectMapper;
         this.agentPresenceService = agentPresenceService;
         this.sender = sender;
+        this.acknowledgements = acknowledgements;
     }
 
     /** 인증 필터를 통과하고 WebSocket 연결이 성립하면 Spring이 호출한다. */
@@ -93,6 +96,10 @@ public class DevLinkWebSocketHandler extends TextWebSocketHandler {
                 handleHeartbeat(agent, session, event.path("payload"));
                 return;
             }
+            if ("ACK".equals(event.path("type").textValue())) {
+                handleAck(agent, session, event.path("payload"));
+                return;
+            }
             status = readPresenceStatus(event);
         } catch (JsonProcessingException | IllegalArgumentException exception) {
             session.close(CloseStatus.POLICY_VIOLATION);
@@ -121,11 +128,27 @@ public class DevLinkWebSocketHandler extends TextWebSocketHandler {
     /** 정상·비정상 종료 모두 현재 연결을 제거하고 해당 Agent를 오프라인 처리한다. */
     @Override
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
+        // 교체된 옛 연결의 종료여도 그 연결의 ACK 대기는 해제
+        acknowledgements.connectionClosed(session);
         // 연결 중 인증이 비활성화됐더라도 기존 인증 신원으로 종료 처리는 수행
         if (session.getPrincipal() instanceof Authentication authentication
                 && authentication.getPrincipal() instanceof AgentPrincipal agent) {
             unregisterAndMarkOffline(agent, session);
         }
+    }
+
+    private void handleAck(AgentPrincipal agent, WebSocketSession session, JsonNode payload) {
+        if (payload.size() != 2 || !payload.path("event_id").isTextual()
+                || payload.path("event_id").textValue().isBlank()
+                || payload.path("event_id").textValue().length() > 128
+                || !payload.path("task_id").isIntegralNumber()
+                || !payload.path("task_id").canConvertToLong()
+                || payload.path("task_id").longValue() <= 0) {
+            throw new IllegalArgumentException("Invalid ACK message");
+        }
+        // 형식이 맞더라도 알 수 없는 ACK·중복 ACK·늦은 ACK는 무시하고 연결은 유지
+        acknowledgements.acknowledge(agent, session,
+                payload.path("task_id").longValue(), payload.path("event_id").textValue());
     }
 
     private void unregisterAndMarkOffline(AgentPrincipal agent, WebSocketSession session) {
