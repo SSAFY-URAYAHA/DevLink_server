@@ -3,7 +3,7 @@ package com.devlink.server.controller;
 import java.util.stream.Stream;
 import com.devlink.server.common.BusinessException;
 import com.devlink.server.common.ErrorCode;
-import com.devlink.server.domain.task.DeliveryStatus;
+import com.devlink.server.dto.TaskRoutingResult.Status;
 import com.devlink.server.domain.task.TaskStatus;
 import com.devlink.server.dto.CreateTaskRequest;
 import com.devlink.server.dto.CreateTaskResponse;
@@ -51,7 +51,7 @@ class TaskControllerTest {
                 .andExpect(jsonPath("$.data.taskId").value(101))
                 .andExpect(jsonPath("$.data.status").value("PENDING"))
                 .andExpect(jsonPath("$.data.version").value(0))
-                .andExpect(jsonPath("$.data.delivery.status").value("FAILED"));
+                .andExpect(jsonPath("$.data.delivery.status").value("RECEIVER_OFFLINE"));
         verify(service).create(1L, 3L, valid);
     }
 
@@ -123,7 +123,7 @@ class TaskControllerTest {
 
     private CreateTaskResponse response(boolean replayed) {
         return new CreateTaskResponse(101L, 4L, TaskStatus.PENDING, 0L, replayed,
-                new TaskDeliveryResult(DeliveryStatus.FAILED, "ACK_TIMEOUT"));
+                new TaskDeliveryResult(Status.RECEIVER_OFFLINE, "RECEIVER_OFFLINE"));
     }
 
     @Test

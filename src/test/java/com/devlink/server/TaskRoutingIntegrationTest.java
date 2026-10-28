@@ -30,6 +30,11 @@ import com.devlink.server.repository.TeamRepository;
 import com.devlink.server.repository.UserRepository;
 import com.devlink.server.service.AgentTokenVerifier;
 import com.devlink.server.service.TaskRoutingService;
+import com.devlink.server.service.TaskCreationService;
+import com.devlink.server.dto.CreateTaskRequest;
+import com.devlink.server.domain.taskevent.TaskEvent;
+import com.devlink.server.domain.taskevent.TaskEventType;
+import com.devlink.server.repository.TaskEventRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
@@ -53,6 +58,8 @@ import static org.awaitility.Awaitility.await;
 @Import(TaskRoutingIntegrationTest.TokenVerificationFixture.class)
 class TaskRoutingIntegrationTest extends AbstractIntegrationTest {
     @Autowired private TaskRoutingService routing;
+    @Autowired private TaskCreationService creation;
+    @Autowired private TaskEventRepository taskEvents;
     @Autowired private TaskRepository tasks;
     @Autowired private AgentRepository agents;
     @Autowired private UserRepository users;
@@ -75,6 +82,25 @@ class TaskRoutingIntegrationTest extends AbstractIntegrationTest {
         requester = createAgent("requester-" + unique);
         receiver = createAgent("receiver-" + unique);
         verifiedAgents.set(Map.of("requester-token", principal(requester), "receiver-token", principal(receiver)));
+    }
+
+    @Test
+    void creatingTaskRoutesToRealBrokerOnceAfterCommit() throws Exception {
+        try (var client = HttpClient.newHttpClient();
+                var broker = connect(client, "receiver-token", receiver.getId())) {
+            broker.presence("ONLINE");
+            var request = new CreateTaskRequest(UUID.randomUUID().toString(),
+                    requester.getId(), receiver.getId(), "Create and route");
+            var result = creation.create(teamId, requester.getOwnerUserId(), request);
+            assertThat(broker.next().path("payload").path("task_id").asLong()).isEqualTo(result.taskId());
+            assertThat(result.delivery().status()).isEqualTo(Status.SENT);
+            assertThat(tasks.findById(result.taskId()).orElseThrow().getDeliveredAt()).isNotNull();
+            assertThat(taskEvents.findByTaskIdOrderByCreatedAtAsc(result.taskId()))
+                    .extracting(TaskEvent::getEventType).containsExactly(TaskEventType.CREATED, TaskEventType.DELIVERING, TaskEventType.DELIVERED);
+            var replay = creation.create(teamId, requester.getOwnerUserId(), request);
+            assertThat(replay.replayed()).isTrue();
+            assertThat(broker.listener.messages.poll(200, TimeUnit.MILLISECONDS)).isNull();
+        }
     }
 
     @Test

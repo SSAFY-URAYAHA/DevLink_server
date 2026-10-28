@@ -1,17 +1,14 @@
 package com.devlink.server.dto;
 
 import java.util.Objects;
-import com.devlink.server.domain.task.DeliveryStatus;
+import com.devlink.server.dto.TaskRoutingResult.Status;
 
-public record TaskDeliveryResult(DeliveryStatus status, String reasonCode) {
+public record TaskDeliveryResult(Status status, String reasonCode) {
     public TaskDeliveryResult {
         Objects.requireNonNull(status, "status");
-        if (status == DeliveryStatus.DELIVERED && reasonCode != null) {
+        if (status == Status.SENT && reasonCode != null) {
             throw new IllegalArgumentException("Successful delivery cannot have a failure reason");
         }
     }
 
-    public static TaskDeliveryResult unknown() {
-        return new TaskDeliveryResult(DeliveryStatus.UNKNOWN, null);
-    }
 }
