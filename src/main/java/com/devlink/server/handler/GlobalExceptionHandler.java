@@ -3,6 +3,7 @@ package com.devlink.server.handler;
 import com.devlink.server.common.ApiResponse;
 import com.devlink.server.common.BusinessException;
 import com.devlink.server.common.ErrorCode;
+import com.devlink.server.exception.InvalidTaskInputException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
@@ -28,6 +29,12 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ApiResponse<Void>> handleUnexpected(Exception exception) {
         log.error("Unhandled request exception", exception);
         return response(ErrorCode.INTERNAL_SERVER_ERROR);
+    }
+
+    @ExceptionHandler(InvalidTaskInputException.class)
+    public ResponseEntity<ApiResponse<Void>> handleInvalidTaskInput(
+        InvalidTaskInputException exception) {
+        return response(ErrorCode.VALIDATION_FAILED);
     }
 
     private ResponseEntity<ApiResponse<Void>> response(ErrorCode error) {
