@@ -6,6 +6,7 @@ import java.time.LocalDateTime;
 import com.devlink.server.common.BusinessException;
 import com.devlink.server.common.ErrorCode;
 import com.devlink.server.domain.task.Task;
+import com.devlink.server.dto.TaskRoutingResult;
 import com.devlink.server.dto.TaskRoutingResult.Status;
 import com.devlink.server.domain.taskevent.TaskEvent;
 import com.devlink.server.domain.taskevent.TaskEventType;
@@ -57,36 +58,47 @@ public class TaskCreationService {
         transaction.executeWithoutResult(tx -> taskEventRepository.save(
                 TaskEvent.of(taskId, TaskEventType.DELIVERING, "DELIVERING")));
 
-        // 전송 결과 받기
-        TaskDeliveryResult delivery = deliverTask(task);
+        // 브로커 전송 결과 TaskRoutingResult
+        TaskRoutingResult routing = taskRoutingService.sendTask(task.getId());
 
         // 결과에 따라 이력 저장
-        task = saveDeliveryEvent(task, delivery);
+        task = saveDeliveryEvent(task, routing);
+
+        // routing status -> delivery 응답 DTO로 변환
+        TaskDeliveryResult delivery = new TaskDeliveryResult(
+            routing.status() == Status.SENT ? TaskEventType.DELIVERED : TaskEventType.DELIVERY_FAILED,
+            routing.status() == Status.SENT ? null : routing.status().name()
+        );
 
         // 같은 결과를 응답에 넣기
         return CreateTaskResponse.of(task, false, delivery);
     }
 
-    private TaskDeliveryResult deliverTask(Task task) {
-        var routing = taskRoutingService.sendTask(task.getId());
-        return new TaskDeliveryResult(routing.status(),
-                routing.status() == Status.SENT ? null : routing.status().name());
-    }
-
-    private Task saveDeliveryEvent(Task task, TaskDeliveryResult delivery) {
+    /**
+     * Task의 delivered_at + TaskEvent의 eventType + content 저장
+     * */
+    private Task saveDeliveryEvent(Task task, TaskRoutingResult routing) {
         return transaction.execute(tx -> {
             Task savedTask = taskRepository.findById(task.getId())
                     .orElseThrow(() -> new BusinessException(ErrorCode.RESOURCE_NOT_FOUND));
-            switch (delivery.status()) {
+
+            // TODO: 브로커 ACK 수신(6번) 에 맞춰서 상태 변경 예정 (4번)
+            switch (routing.status()) {
                 case SENT -> {
                     savedTask.markDelivered(LocalDateTime.now());
                     taskEventRepository.save(TaskEvent.of(
-                            task.getId(), TaskEventType.DELIVERED, delivery.status().name()));
+                        task.getId(),
+                        TaskEventType.DELIVERED,
+                        routing.status().name())
+                    );
                 }
-                case RECEIVER_OFFLINE, CONNECTION_UNAVAILABLE, CONNECTION_REPLACED,
-                        TRANSPORT_ERROR, TASK_NOT_PENDING ->
+                case RECEIVER_OFFLINE, CONNECTION_UNAVAILABLE,
+                     CONNECTION_REPLACED, TRANSPORT_ERROR, TASK_NOT_PENDING ->
                     taskEventRepository.save(TaskEvent.of(
-                            task.getId(), TaskEventType.DELIVERY_FAILED, delivery.reasonCode()));
+                            task.getId(),
+                            TaskEventType.DELIVERY_FAILED,
+                            routing.status().name()
+                        ));
             }
             return savedTask;
         });
@@ -98,9 +110,9 @@ public class TaskCreationService {
                         List.of(TaskEventType.DELIVERING, TaskEventType.DELIVERED, TaskEventType.DELIVERY_FAILED))
                 .filter(event -> event.getEventType() != TaskEventType.DELIVERING)
                 .map(event -> {
-                    Status status = event.getEventType() == TaskEventType.DELIVERED
-                            ? Status.SENT : Status.valueOf(event.getContent());
-                    return new TaskDeliveryResult(status, status == Status.SENT ? null : status.name());
+                    TaskEventType status = event.getEventType();
+                    return new TaskDeliveryResult(status,
+                            status == TaskEventType.DELIVERED ? null : event.getContent());
                 })
                 .orElse(null)); // 아직 라우팅 결과가 없거나 이전 형식의 이력만 존재하는 경우
     }

@@ -76,7 +76,7 @@ class TaskCreationIntegrationTest extends AbstractIntegrationTest {
         assertThat(result.replayed()).isFalse();
         assertThat(result.status()).isEqualTo(TaskStatus.PENDING);
         assertThat(result.version()).isEqualTo(1L);
-        assertThat(result.delivery().status()).isEqualTo(TaskRoutingResult.Status.SENT);
+        assertThat(result.delivery().status()).isEqualTo(TaskEventType.DELIVERED);
         assertThat(tasks.findById(result.taskId()).orElseThrow().getDeliveredAt()).isNotNull();
         assertThat(events.findByTaskIdOrderByCreatedAtAsc(result.taskId()))
                 .extracting(TaskEvent::getEventType).containsExactly(TaskEventType.CREATED, TaskEventType.DELIVERING, TaskEventType.DELIVERED);
@@ -101,7 +101,7 @@ class TaskCreationIntegrationTest extends AbstractIntegrationTest {
         when(routing.sendTask(anyLong())).thenAnswer(invocation ->
                 new TaskRoutingResult(invocation.getArgument(0), status, null, null));
         var result = service.create(teamId, userId, request);
-        assertThat(result.delivery()).isEqualTo(new TaskDeliveryResult(status, status.name()));
+        assertThat(result.delivery()).isEqualTo(new TaskDeliveryResult(TaskEventType.DELIVERY_FAILED, status.name()));
         assertThat(result.status()).isEqualTo(TaskStatus.PENDING);
         assertThat(tasks.findById(result.taskId()).orElseThrow().getDeliveredAt()).isNull();
         var history = events.findByTaskIdOrderByCreatedAtAsc(result.taskId());
@@ -118,7 +118,7 @@ class TaskCreationIntegrationTest extends AbstractIntegrationTest {
         when(routing.sendTask(anyLong())).thenAnswer(invocation ->
                 new TaskRoutingResult(invocation.getArgument(0), status, null, null));
         var result = service.create(teamId, userId, request);
-        assertThat(result.delivery()).isEqualTo(new TaskDeliveryResult(status, status.name()));
+        assertThat(result.delivery()).isEqualTo(new TaskDeliveryResult(TaskEventType.DELIVERY_FAILED, status.name()));
         assertThat(events.findByTaskIdOrderByCreatedAtAsc(result.taskId()))
                 .extracting(TaskEvent::getEventType).containsExactly(TaskEventType.CREATED, TaskEventType.DELIVERING, TaskEventType.DELIVERY_FAILED);
     }
@@ -128,7 +128,7 @@ class TaskCreationIntegrationTest extends AbstractIntegrationTest {
         var created = service.create(teamId, userId, request);
         var replay = service.create(teamId, userId, request);
         assertThat(replay.delivery()).isEqualTo(created.delivery());
-        assertThat(replay.delivery().status()).isEqualTo(TaskRoutingResult.Status.SENT);
+        assertThat(replay.delivery().status()).isEqualTo(TaskEventType.DELIVERED);
         verify(routing, times(1)).sendTask(created.taskId());
     }
 

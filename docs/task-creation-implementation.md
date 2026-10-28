@@ -10,7 +10,7 @@
 
 ## 응답 전달 상태
 
-DeliveryStatus enum은 제거했다. TaskDeliveryResult.status는 TaskRoutingResult.Status를 직접 사용한다. SENT, RECEIVER_OFFLINE, CONNECTION_UNAVAILABLE, CONNECTION_REPLACED, TRANSPORT_ERROR, TASK_NOT_PENDING을 변환 없이 반환한다. SENT이면 reasonCode=null이며 다른 상태는 상태 이름을 reasonCode에도 포함한다.
+별도 DeliveryStatus enum 없이 TaskEventType을 사용하여 응답 상태를 DELIVERED / DELIVERY_FAILED 두 가지로 제공한다. 라우팅 결과가 SENT이면 DELIVERED와 reasonCode=null을 반환한다. 나머지는 DELIVERY_FAILED와 원래 라우팅 상태 이름(RECEIVER_OFFLINE, CONNECTION_UNAVAILABLE, CONNECTION_REPLACED, TRANSPORT_ERROR, TASK_NOT_PENDING)을 reasonCode로 반환한다. 재요청 응답도 같은 규칙을 적용한다.
 
 SENT는 소켓 쓰기 성공이다. 이번 변경부터 API에서는 이를 전달 완료 기준으로 사용한다. ACK를 기다리지 않으며 SENT 시 deliveredAt 갱신과 DELIVERED 이력(content=SENT)을 같은 트랜잭션으로 저장한다. 반환 객체는 커밋 후 증가한 version을 포함한다.
 
