@@ -1,6 +1,7 @@
 package com.devlink.server.realtime;
 
 import java.io.IOException;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -8,6 +9,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
@@ -27,6 +29,70 @@ import static org.mockito.Mockito.when;
 
 class ConnectionRegistryTest {
     private final ConnectionRegistry registry = new ConnectionRegistry();
+
+    @Test
+    void firstPingMustArriveBeforeTimeoutAndExpiresAtBoundary() {
+        AtomicLong clock = new AtomicLong();
+        ConnectionRegistry timed = new ConnectionRegistry(clock::get);
+        WebSocketSession session = openSession();
+        timed.register("11", session);
+
+        // 첫 PING이 없어도 등록 시점부터 40초를 계산하며 경계값에서 만료된다.
+        clock.set(Duration.ofSeconds(40).toNanos() - 1);
+        assertThat(timed.removeExpiredConnections(Duration.ofSeconds(40))).isEmpty();
+        clock.incrementAndGet();
+        assertThat(timed.removeExpiredConnections(Duration.ofSeconds(40)))
+                .containsExactly(new ConnectionRegistry.ExpiredConnection("11", session));
+        assertThat(timed.findByAgentId("11")).isEmpty();
+    }
+
+    @Test
+    void validHeartbeatExtendsOnlyTheCurrentConnectionsDeadline() {
+        AtomicLong clock = new AtomicLong();
+        ConnectionRegistry timed = new ConnectionRegistry(clock::get);
+        WebSocketSession session = openSession();
+        timed.register("11", session);
+        clock.set(Duration.ofSeconds(20).toNanos());
+        assertThat(timed.recordHeartbeat("11", session)).isTrue();
+
+        clock.set(Duration.ofSeconds(40).toNanos());
+        assertThat(timed.removeExpiredConnections(Duration.ofSeconds(40))).isEmpty();
+        clock.set(Duration.ofSeconds(60).toNanos());
+        assertThat(timed.removeExpiredConnections(Duration.ofSeconds(40)))
+                .containsExactly(new ConnectionRegistry.ExpiredConnection("11", session));
+    }
+
+    @Test
+    void replacementStartsFreshDeadlineAndRejectsOldHeartbeat() {
+        AtomicLong clock = new AtomicLong();
+        ConnectionRegistry timed = new ConnectionRegistry(clock::get);
+        WebSocketSession previous = openSession();
+        WebSocketSession current = openSession();
+        timed.register("11", previous);
+        clock.set(Duration.ofSeconds(39).toNanos());
+        timed.register("11", current);
+
+        clock.set(Duration.ofSeconds(40).toNanos());
+        assertThat(timed.recordHeartbeat("11", previous)).isFalse();
+        assertThat(timed.removeExpiredConnections(Duration.ofSeconds(40))).isEmpty();
+        assertThat(timed.findByAgentId("11")).contains(current);
+        clock.set(Duration.ofSeconds(79).toNanos());
+        assertThat(timed.removeExpiredConnections(Duration.ofSeconds(40)))
+                .containsExactly(new ConnectionRegistry.ExpiredConnection("11", current));
+    }
+
+    @Test
+    void expiredConnectionCannotBeRevivedByLatePing() {
+        AtomicLong clock = new AtomicLong();
+        ConnectionRegistry timed = new ConnectionRegistry(clock::get);
+        WebSocketSession session = openSession();
+        timed.register("11", session);
+        clock.set(Duration.ofSeconds(40).toNanos());
+        timed.removeExpiredConnections(Duration.ofSeconds(40));
+
+        assertThat(timed.recordHeartbeat("11", session)).isFalse();
+        assertThat(timed.findByAgentId("11")).isEmpty();
+    }
 
     @Test
     void registersAndFindsAnOpenConnection() {

@@ -1,9 +1,13 @@
 package com.devlink.server.realtime;
 
 import java.io.IOException;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.function.LongSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -13,7 +17,7 @@ import org.springframework.web.socket.WebSocketSession;
 
 /**
  * 인증된 Agent별 현재 브로커 연결을 관리한다.
- * Agent의 ONLINE/OFFLINE 상태는 AGENT_PRESENCE 처리에서 별도로 관리한다.
+ * 연결 중 Agent 상태는 AGENT_PRESENCE로 보고하며, 단절·만료 시 서비스에서 OFFLINE 처리한다.
  */
 @Component
 public class ConnectionRegistry {
@@ -21,7 +25,17 @@ public class ConnectionRegistry {
     private static final CloseStatus CONNECTION_REPLACED =
             new CloseStatus(4002, "Connection replaced");
 
-    private final ConcurrentMap<String, WebSocketSession> connections = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, ConnectionState> connections = new ConcurrentHashMap<>();
+    private final LongSupplier nanoTime;
+
+    public ConnectionRegistry() {
+        this(System::nanoTime);
+    }
+
+    // 경과 시간은 시스템 시계 변경의 영향을 받지 않는 단조 시계로 측정
+    ConnectionRegistry(LongSupplier nanoTime) {
+        this.nanoTime = nanoTime;
+    }
 
     /**
      * 인증 과정에서 확인한 Agent ID와 열린 연결을 등록한다.
@@ -32,23 +46,62 @@ public class ConnectionRegistry {
         Assert.notNull(session, "session must not be null");
         Assert.isTrue(session.isOpen(), "session must be open");
 
-        WebSocketSession previous = connections.put(agentId, session);
-        if (previous != null && previous != session) {
-            closeReplacedConnection(agentId, previous);
+        ConnectionState[] previous = {null};
+        connections.compute(agentId, (key, current) -> {
+            previous[0] = current;
+            // 첫 PING이 오지 않는 연결도 만료되도록 등록 시점부터 감시
+            return new ConnectionState(session, nanoTime.getAsLong());
+        });
+        if (previous[0] != null && previous[0].session() != session) {
+            closeReplacedConnection(agentId, previous[0].session());
         }
     }
 
     /** 현재 열린 브로커 연결을 반환한다. Agent의 실제 접속 상태를 뜻하지는 않는다. */
     public Optional<WebSocketSession> findByAgentId(String agentId) {
         Assert.hasText(agentId, "agentId must not be blank");
-        return Optional.ofNullable(connections.get(agentId)).filter(WebSocketSession::isOpen);
+        return Optional.ofNullable(connections.get(agentId))
+                .map(ConnectionState::session).filter(WebSocketSession::isOpen);
     }
 
     /** 이전 연결의 메시지가 새 연결에 영향을 주지 않도록 실제 세션 객체까지 비교한다. */
     public boolean isCurrentConnection(String agentId, WebSocketSession session) {
         Assert.hasText(agentId, "agentId must not be blank");
         Assert.notNull(session, "session must not be null");
-        return connections.get(agentId) == session && session.isOpen();
+        ConnectionState current = connections.get(agentId);
+        return current != null && current.session() == session && session.isOpen();
+    }
+
+    /** 현재 연결의 유효한 JSON PING만 감시 시간을 연장한다. Agent 상태는 변경하지 않는다. */
+    public boolean recordHeartbeat(String agentId, WebSocketSession session) {
+        Assert.hasText(agentId, "agentId must not be blank");
+        Assert.notNull(session, "session must not be null");
+        boolean[] refreshed = {false};
+        connections.computeIfPresent(agentId, (key, current) -> {
+            if (current.session() == session && session.isOpen()) {
+                refreshed[0] = true;
+                return new ConnectionState(session, nanoTime.getAsLong());
+            }
+            return current;
+        });
+        return refreshed[0];
+    }
+
+    /** PING 갱신·재접속과 같은 잠금 안에서 만료를 판정하고 해당 연결만 제거한다. */
+    public List<ExpiredConnection> removeExpiredConnections(Duration timeout) {
+        Assert.notNull(timeout, "timeout must not be null");
+        Assert.isTrue(!timeout.isZero() && !timeout.isNegative(), "timeout must be positive");
+        long timeoutNanos = timeout.toNanos();
+        List<ExpiredConnection> expired = new ArrayList<>();
+        connections.forEach((agentId, ignored) -> connections.computeIfPresent(agentId, (key, current) -> {
+            if (nanoTime.getAsLong() - current.lastPingNanos() >= timeoutNanos) {
+                expired.add(new ExpiredConnection(agentId, current.session()));
+                return null;
+            }
+            return current;
+        }));
+        // 소켓 종료·DB 갱신은 맵 잠금 밖에서 수행해 연결 등록과의 교착을 피함
+        return expired;
     }
 
     /**
@@ -61,7 +114,7 @@ public class ConnectionRegistry {
 
         boolean[] removed = {false};
         connections.computeIfPresent(agentId, (key, current) -> {
-            if (current == session) {
+            if (current.session() == session) {
                 removed[0] = true;
                 return null;
             }
@@ -70,6 +123,10 @@ public class ConnectionRegistry {
         return removed[0];
     }
 
+    private record ConnectionState(WebSocketSession session, long lastPingNanos) { }
+
+    public record ExpiredConnection(String agentId, WebSocketSession session) { }
+
     private void closeReplacedConnection(String agentId, WebSocketSession previous) {
         if (!previous.isOpen()) {
             return;
@@ -77,7 +134,6 @@ public class ConnectionRegistry {
         try {
             previous.close(CONNECTION_REPLACED);
         } catch (IOException exception) {
-            // 종료에 실패해도 이전 연결을 다시 활성 연결로 복원하지 않는다.
             log.warn("Failed to close replaced broker connection for agent {}", agentId, exception);
         }
     }

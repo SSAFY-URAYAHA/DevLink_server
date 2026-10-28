@@ -1,5 +1,9 @@
 server:
     port: 8080
+devlink:
+    broker:
+        heartbeat-timeout-ms: 40000
+        heartbeat-check-interval-ms: 1000
 spring:
     application:
         name: devlink-server
