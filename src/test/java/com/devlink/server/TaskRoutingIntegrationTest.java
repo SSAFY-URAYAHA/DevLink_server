@@ -93,7 +93,7 @@ class TaskRoutingIntegrationTest extends AbstractIntegrationTest {
                     requester.getId(), receiver.getId(), "Create and route");
             var result = creation.create(teamId, requester.getOwnerUserId(), request);
             assertThat(broker.next().path("payload").path("task_id").asLong()).isEqualTo(result.taskId());
-            assertThat(result.delivery().status()).isEqualTo(Status.SENT);
+            assertThat(result.delivery().status()).isEqualTo(TaskEventType.DELIVERED);
             assertThat(tasks.findById(result.taskId()).orElseThrow().getDeliveredAt()).isNotNull();
             assertThat(taskEvents.findByTaskIdOrderByCreatedAtAsc(result.taskId()))
                     .extracting(TaskEvent::getEventType).containsExactly(TaskEventType.CREATED, TaskEventType.DELIVERING, TaskEventType.DELIVERED);
