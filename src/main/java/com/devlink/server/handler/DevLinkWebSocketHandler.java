@@ -4,6 +4,7 @@ import java.util.Map;
 import com.devlink.server.common.BusinessException;
 import com.devlink.server.domain.AgentPrincipal;
 import com.devlink.server.domain.agent.AgentStatus;
+import com.devlink.server.realtime.BrokerMessageSender;
 import com.devlink.server.realtime.ConnectionRegistry;
 import com.devlink.server.service.AgentPresenceService;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -23,12 +24,14 @@ public class DevLinkWebSocketHandler extends TextWebSocketHandler {
     private final ConnectionRegistry connectionRegistry;
     private final ObjectMapper objectMapper;
     private final AgentPresenceService agentPresenceService;
+    private final BrokerMessageSender sender;
 
     public DevLinkWebSocketHandler(ConnectionRegistry connectionRegistry, ObjectMapper objectMapper,
-            AgentPresenceService agentPresenceService) {
+            AgentPresenceService agentPresenceService, BrokerMessageSender sender) {
         this.connectionRegistry = connectionRegistry;
         this.objectMapper = objectMapper;
         this.agentPresenceService = agentPresenceService;
+        this.sender = sender;
     }
 
     /** 인증 필터를 통과하고 WebSocket 연결이 성립하면 Spring이 호출한다. */
@@ -44,14 +47,14 @@ public class DevLinkWebSocketHandler extends TextWebSocketHandler {
 
         String agentId = agent.getName();
         try {
-            connectionRegistry.register(agentId, session);
-            if (!connectionRegistry.isCurrentConnection(agentId, session)) {
-                return;
+            // 등록 직후 작업 전송이 시작돼도 BROKER_READY가 먼저 나가도록 같은 소켓 잠금을 사용
+            synchronized (session) {
+                connectionRegistry.register(agentId, session);
+                var ready = Map.of(
+                        "type", "BROKER_READY",
+                        "payload", Map.of("connection_id", session.getId(), "agent_id", agent.agentId()));
+                sender.sendIfCurrent(agentId, session, ready);
             }
-            var ready = Map.of(
-                    "type", "BROKER_READY",
-                    "payload", Map.of("connection_id", session.getId(), "agent_id", agent.agentId()));
-            session.sendMessage(new TextMessage(objectMapper.writeValueAsString(ready)));
         } catch (Exception exception) {
             // 정리 중 DB 오류가 발생해도 최초 오류를 보존하고 소켓 종료까지 시도
             try {
@@ -166,7 +169,8 @@ public class DevLinkWebSocketHandler extends TextWebSocketHandler {
         var pong = Map.of("type", "HEARTBEAT", "payload",
                 Map.of("kind", "PONG", "ping_id", payload.path("ping_id").textValue()));
         try {
-            session.sendMessage(new TextMessage(objectMapper.writeValueAsString(pong)));
+            // 작업 메시지와 PONG이 겹쳐도 공통 전송기가 소켓 쓰기를 순서대로 처리
+            sender.sendIfCurrent(agent.getName(), session, pong);
         } catch (Exception exception) {
             // PONG 전송 실패로 단절을 발견한 경우에도 즉시 연결 정리를 시도
             try {

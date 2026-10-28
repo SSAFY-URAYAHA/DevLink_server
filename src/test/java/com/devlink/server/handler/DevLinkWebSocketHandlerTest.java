@@ -8,6 +8,7 @@ import com.devlink.server.domain.AgentPrincipal;
 import com.devlink.server.domain.agent.AgentStatus;
 import com.devlink.server.service.AgentPresenceService;
 import com.devlink.server.realtime.ConnectionRegistry;
+import com.devlink.server.realtime.BrokerMessageSender;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -36,7 +37,8 @@ class DevLinkWebSocketHandlerTest {
     private final ConnectionRegistry registry = new ConnectionRegistry();
     private final ObjectMapper mapper = new ObjectMapper();
     private final AgentPresenceService presence = mock(AgentPresenceService.class);
-    private final DevLinkWebSocketHandler handler = new DevLinkWebSocketHandler(registry, mapper, presence);
+    private final DevLinkWebSocketHandler handler = new DevLinkWebSocketHandler(
+            registry, mapper, presence, new BrokerMessageSender(registry, mapper));
 
     @Test
     void pingRepliesWithMatchingPongWithoutChangingAgentPresence() throws Exception {
