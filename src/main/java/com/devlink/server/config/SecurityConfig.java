@@ -42,7 +42,7 @@ public class SecurityConfig {
             RestAuthenticationEntryPoint entryPoint, RestAccessDeniedHandler deniedHandler) throws Exception {
         AgentTokenVerifier verifier = token -> {
             var delegate = verifiers.getIfAvailable();
-            // Fail closed until the authentication module provides real token verification.
+            // 등록된 검증기로 현재 유효한 Agent 신원 확인
             return delegate == null ? Optional.empty() : delegate.verify(token);
         };
         http.securityMatcher("/ws/broker")
@@ -63,6 +63,33 @@ public class SecurityConfig {
 
     @Bean
     @Order(2)
+    SecurityFilterChain agentApiSecurityFilterChain(HttpSecurity http,
+            @Value("${devlink.cors.allowed-origins}") List<String> allowedOrigins,
+            ObjectProvider<AgentTokenVerifier> verifiers,
+            RestAuthenticationEntryPoint entryPoint, RestAccessDeniedHandler deniedHandler) throws Exception {
+        AgentTokenVerifier verifier = token -> {
+            var delegate = verifiers.getIfAvailable();
+            return delegate == null ? Optional.empty() : delegate.verify(token);
+        };
+        http.securityMatcher("/api/v1/agent/**")
+                .cors(cors -> cors.configurationSource(apiCorsConfigurationSource(allowedOrigins)))
+                .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+                .requestCache(AbstractHttpConfigurer::disable)
+                // 쿠키 인증을 사용하지 않는 Agent 전용 Bearer 경로에만 CSRF 예외 적용
+                .csrf(AbstractHttpConfigurer::disable)
+                .authorizeHttpRequests(authorize -> authorize.anyRequest().hasRole("AGENT"))
+                .addFilterBefore(new AgentTokenAuthenticationFilter(verifier, entryPoint),
+                        AnonymousAuthenticationFilter.class)
+                .formLogin(AbstractHttpConfigurer::disable)
+                .httpBasic(AbstractHttpConfigurer::disable)
+                .exceptionHandling(exceptions -> exceptions
+                        .authenticationEntryPoint(entryPoint)
+                        .accessDeniedHandler(deniedHandler));
+        return http.build();
+    }
+
+    @Bean
+    @Order(3)
     SecurityFilterChain securityFilterChain(HttpSecurity http,
             @Value("${devlink.cors.allowed-origins}") List<String> allowedOrigins,
             RestAuthenticationEntryPoint entryPoint, RestAccessDeniedHandler deniedHandler,
