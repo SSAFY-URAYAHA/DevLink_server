@@ -7,7 +7,6 @@ import jakarta.validation.constraints.Size;
 
 public record CreateTaskRequest(
         @NotBlank @Size(max = 64) String requestKey,
-        @NotNull @Positive Long requesterAgentId,
         @NotNull @Positive Long receiverAgentId,
         @NotBlank String prompt) {
 }

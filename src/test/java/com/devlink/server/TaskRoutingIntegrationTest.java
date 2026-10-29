@@ -90,14 +90,14 @@ class TaskRoutingIntegrationTest extends AbstractIntegrationTest {
                 var broker = connect(client, "receiver-token", receiver.getId())) {
             broker.presence("ONLINE");
             var request = new CreateTaskRequest(UUID.randomUUID().toString(),
-                    requester.getId(), receiver.getId(), "Create and route");
-            var result = creation.create(teamId, requester.getOwnerUserId(), request);
+                    receiver.getId(), "Create and route");
+            var result = creation.create(teamId, requester.getId(), request);
             assertThat(broker.next().path("payload").path("task_id").asLong()).isEqualTo(result.taskId());
             assertThat(result.delivery().status()).isEqualTo(TaskEventType.ACK_PENDING);
             assertThat(tasks.findById(result.taskId()).orElseThrow().getDeliveredAt()).isNull();
             assertThat(taskEvents.findByTaskIdOrderByCreatedAtAsc(result.taskId()))
                     .extracting(TaskEvent::getEventType).containsExactly(TaskEventType.CREATED, TaskEventType.ACK_PENDING);
-            var replay = creation.create(teamId, requester.getOwnerUserId(), request);
+            var replay = creation.create(teamId, requester.getId(), request);
             assertThat(replay.replayed()).isTrue();
             assertThat(broker.listener.messages.poll(200, TimeUnit.MILLISECONDS)).isNull();
         }

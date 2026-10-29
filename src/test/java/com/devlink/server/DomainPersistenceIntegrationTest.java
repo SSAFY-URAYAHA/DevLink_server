@@ -33,6 +33,31 @@ class DomainPersistenceIntegrationTest extends AbstractIntegrationTest {
     @Autowired private EntityManager em;
 
     @Test
+    void rejectionPersistsReasonAndEndTimeWithVersionUpdate() {
+        User user = users.save(User.create("reject@example.com", "Tester", null, "password-hash"));
+        Team team = teams.save(Team.create("Rejection", "reject-invite"));
+        Agent agent = agents.save(Agent.create(team.getId(), user.getId(), "Codex", null, ToolType.CODEX, "server"));
+        Task task = tasks.save(Task.create("reject-request", team.getId(), agent.getId(),
+                user.getId(), agent.getId(), "Prompt"));
+        em.flush();
+        Long initialVersion = task.getVersion();
+        task.reject(agent.getId(), "Project access unavailable");
+        em.flush();
+        Long updatedVersion = task.getVersion();
+        assertThat(updatedVersion).isGreaterThan(initialVersion);
+        em.clear();
+
+        Task saved = tasks.findById(task.getId()).orElseThrow();
+        assertThat(saved.getStatus()).isEqualTo(TaskStatus.REJECTED);
+        assertThat(saved.getVersion()).isEqualTo(updatedVersion);
+        assertThat(saved.getResultText()).isEqualTo("Project access unavailable");
+        assertThat(saved.getCompletedAt()).isNotNull();
+        assertThat(saved.getStartedAt()).isNull();
+        assertThat(saved.getDeliveredAt()).isNull();
+        assertThat(saved.isPartiallyModified()).isFalse();
+    }
+
+    @Test
     void savesAllEntitiesAndQueriesThemWithLifecycleAndVersionUpdates() {
         User user = users.save(User.create("test@example.com", "Tester", null, "password-hash"));
         Team team = teams.save(Team.create("DevLink", "invite"));

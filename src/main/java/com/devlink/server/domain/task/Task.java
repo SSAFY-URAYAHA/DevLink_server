@@ -92,6 +92,17 @@ public class Task {
         this.startedAt = LocalDateTime.now();
     }
 
+    /** 수신 Agent가 시작 전 작업을 거절한다. 사유는 resultText, 종료 시각은 completedAt에 저장한다. */
+    public void reject(Long agentId, String reason) {
+        requireReceiverAndStatus(agentId, TaskStatus.PENDING);
+        requireValue(reason, "rejectionReason");
+
+        this.status = TaskStatus.REJECTED;
+        this.resultText = reason;
+        this.partiallyModified = false;
+        this.completedAt = LocalDateTime.now();
+    }
+
     /** 메서드 호출 시 작업 상태와 결과 파일 정보를 하나의 트랜잭션으로 저장
      *  이 메서드는 Task의 상태, 결과 요약, 완료 시각 변경을 담당하므로
      *  Service에서 TaskFile 정보를 저장할것

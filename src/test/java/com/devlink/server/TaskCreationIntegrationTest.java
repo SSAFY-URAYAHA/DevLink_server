@@ -56,7 +56,7 @@ class TaskCreationIntegrationTest extends AbstractIntegrationTest {
         userId = users.save(User.create(key + "@test.com", "Tester", null, "hash")).getId();
         teamId = teams.save(Team.create("Test", key)).getId();
         agentId = agents.save(Agent.create(teamId, userId, "Agent", null, ToolType.CODEX, "project")).getId();
-        request = new CreateTaskRequest(key, agentId, agentId, "Implement feature");
+        request = new CreateTaskRequest(key, agentId, "Implement feature");
         when(routing.sendTask(anyLong())).thenAnswer(invocation ->
                 new TaskRoutingResult(invocation.getArgument(0), TaskRoutingResult.Status.SENT, "event", "connection"));
     }
@@ -69,10 +69,10 @@ class TaskCreationIntegrationTest extends AbstractIntegrationTest {
             assertThat(tasks.findById(taskId)).isPresent();
             assertThat(events.findByTaskIdOrderByCreatedAtAsc(taskId))
                     .extracting(TaskEvent::getEventType).containsExactly(TaskEventType.CREATED);
-            assertThat(service.create(teamId, userId, request).delivery()).isNull();
+            assertThat(service.create(teamId, agentId, request).delivery()).isNull();
             return new TaskRoutingResult(taskId, TaskRoutingResult.Status.SENT, "event", "connection");
         });
-        var result = service.create(teamId, userId, request);
+        var result = service.create(teamId, agentId, request);
         assertThat(result.replayed()).isFalse();
         assertThat(result.status()).isEqualTo(TaskStatus.PENDING);
         assertThat(result.version()).isEqualTo(0L);
@@ -85,8 +85,8 @@ class TaskCreationIntegrationTest extends AbstractIntegrationTest {
 
     @Test
     void duplicateReturnsExistingTaskWithoutAnotherHistory() {
-        var created = service.create(teamId, userId, request);
-        var replay = service.create(teamId, userId, request);
+        var created = service.create(teamId, agentId, request);
+        var replay = service.create(teamId, agentId, request);
         assertThat(replay.replayed()).isTrue();
         assertThat(replay.taskId()).isEqualTo(created.taskId());
         assertThat(tasks.findByTeamIdOrderByCreatedAtDesc(teamId)).hasSize(1);
@@ -100,7 +100,7 @@ class TaskCreationIntegrationTest extends AbstractIntegrationTest {
     void routingFailureIsRecordedAndReturned(TaskRoutingResult.Status status) {
         when(routing.sendTask(anyLong())).thenAnswer(invocation ->
                 new TaskRoutingResult(invocation.getArgument(0), status, null, null));
-        var result = service.create(teamId, userId, request);
+        var result = service.create(teamId, agentId, request);
         assertThat(result.delivery()).isEqualTo(new TaskDeliveryResult(TaskEventType.DELIVERY_NOT_SENT, status.name()));
         assertThat(result.status()).isEqualTo(TaskStatus.PENDING);
         assertThat(tasks.findById(result.taskId()).orElseThrow().getDeliveredAt()).isNull();
@@ -108,7 +108,7 @@ class TaskCreationIntegrationTest extends AbstractIntegrationTest {
         assertThat(history).extracting(TaskEvent::getEventType)
                 .containsExactly(TaskEventType.CREATED, TaskEventType.DELIVERY_NOT_SENT);
         assertThat(history.getLast().getContent()).isEqualTo(status.name());
-        assertThat(service.create(teamId, userId, request).delivery()).isEqualTo(result.delivery());
+        assertThat(service.create(teamId, agentId, request).delivery()).isEqualTo(result.delivery());
         verify(routing, times(1)).sendTask(result.taskId());
     }
 
@@ -119,7 +119,7 @@ class TaskCreationIntegrationTest extends AbstractIntegrationTest {
                 new TaskRoutingResult(invocation.getArgument(0), status, null, null));
         var expected = status == TaskRoutingResult.Status.TRANSPORT_ERROR
                 ? TaskEventType.DELIVERY_UNKNOWN : TaskEventType.DELIVERY_NOT_SENT;
-        var result = service.create(teamId, userId, request);
+        var result = service.create(teamId, agentId, request);
         assertThat(result.delivery()).isEqualTo(new TaskDeliveryResult(expected, status.name()));
         assertThat(events.findByTaskIdOrderByCreatedAtAsc(result.taskId()))
                 .extracting(TaskEvent::getEventType).containsExactly(TaskEventType.CREATED, expected);
@@ -127,8 +127,8 @@ class TaskCreationIntegrationTest extends AbstractIntegrationTest {
 
     @Test
     void replayReturnsStoredSentResultWithoutResending() {
-        var created = service.create(teamId, userId, request);
-        var replay = service.create(teamId, userId, request);
+        var created = service.create(teamId, agentId, request);
+        var replay = service.create(teamId, agentId, request);
         assertThat(replay.delivery()).isEqualTo(created.delivery());
         assertThat(replay.delivery().status()).isEqualTo(TaskEventType.ACK_PENDING);
         verify(routing, times(1)).sendTask(created.taskId());
@@ -138,7 +138,7 @@ class TaskCreationIntegrationTest extends AbstractIntegrationTest {
     void routingHistoryFailureKeepsCreatedTask() {
         doThrow(new IllegalStateException("routing history failed")).when(events)
                 .save(argThat(event -> event.getEventType() == TaskEventType.ACK_PENDING));
-        var response = service.create(teamId, userId, request);
+        var response = service.create(teamId, agentId, request);
         assertThat(response.delivery()).isEqualTo(new TaskDeliveryResult(
                 TaskEventType.DELIVERY_UNKNOWN, "HISTORY_RECORD_FAILED"));
         var task = tasks.findByRequesterUserIdAndRequestKey(userId, request.requestKey()).orElseThrow();
@@ -162,13 +162,13 @@ class TaskCreationIntegrationTest extends AbstractIntegrationTest {
                     });
             return new TaskRoutingResult(taskId, status, "event", "connection");
         });
-        var response = service.create(teamId, userId, request);
+        var response = service.create(teamId, agentId, request);
         assertThat(response.delivery().status()).isEqualTo(TaskEventType.ACK_RECEIVED);
         assertThat(response.status()).isEqualTo(TaskStatus.PENDING);
         assertThat(events.findByTaskIdOrderByCreatedAtAsc(response.taskId()))
                 .extracting(TaskEvent::getEventType)
                 .containsExactly(TaskEventType.CREATED, TaskEventType.ACK_RECEIVED);
-        assertThat(service.create(teamId, userId, request).delivery()).isEqualTo(response.delivery());
+        assertThat(service.create(teamId, agentId, request).delivery()).isEqualTo(response.delivery());
         verify(routing, times(1)).sendTask(response.taskId());
     }
 
@@ -183,7 +183,7 @@ class TaskCreationIntegrationTest extends AbstractIntegrationTest {
                     });
             return new TaskRoutingResult(taskId, TaskRoutingResult.Status.SENT, "event", "connection");
         });
-        var response = service.create(teamId, userId, request);
+        var response = service.create(teamId, agentId, request);
         assertThat(response.delivery()).isEqualTo(
                 new TaskDeliveryResult(TaskEventType.DELIVERY_UNKNOWN, "ACK_TIMEOUT"));
         assertThat(events.findByTaskIdOrderByCreatedAtAsc(response.taskId())).hasSize(2);
@@ -201,7 +201,7 @@ class TaskCreationIntegrationTest extends AbstractIntegrationTest {
                     });
             return saved;
         }).when(events).save(argThat(event -> event.getEventType() == TaskEventType.ACK_PENDING));
-        var response = service.create(teamId, userId, request);
+        var response = service.create(teamId, agentId, request);
         assertThat(response.delivery()).isEqualTo(
                 new TaskDeliveryResult(TaskEventType.DELIVERY_UNKNOWN, "HISTORY_RECORD_FAILED"));
         assertThat(tasks.findById(response.taskId())).isPresent();
@@ -213,16 +213,60 @@ class TaskCreationIntegrationTest extends AbstractIntegrationTest {
     void createdHistoryFailureRollsBackTask() {
         doThrow(new IllegalStateException("history storage failed")).when(events)
                 .save(argThat(event -> event.getEventType() == TaskEventType.CREATED));
-        assertThatThrownBy(() -> service.create(teamId, userId, request))
+        assertThatThrownBy(() -> service.create(teamId, agentId, request))
                 .isInstanceOf(IllegalStateException.class);
         assertThat(tasks.findByRequesterUserIdAndRequestKey(userId, request.requestKey())).isEmpty();
         verifyNoInteractions(routing);
     }
 
     @Test
+    void requesterIdentityComesFromAgentAndItsOwner() {
+        Long requesterId = agents.save(Agent.create(teamId, userId, "Requester", null,
+                ToolType.CODEX, "project")).getId();
+        var result = service.create(teamId, requesterId, request);
+        var saved = tasks.findById(result.taskId()).orElseThrow();
+        assertThat(saved.getRequesterAgentId()).isEqualTo(requesterId);
+        assertThat(saved.getRequesterUserId()).isEqualTo(userId);
+        assertThat(saved.getReceiverAgentId()).isEqualTo(agentId);
+    }
+
+    @Test
+    void missingRequesterDoesNotCreateTask() {
+        assertThatThrownBy(() -> service.create(teamId, Long.MAX_VALUE, request))
+                .isInstanceOfSatisfying(BusinessException.class,
+                        error -> assertThat(error.getErrorCode()).isEqualTo(ErrorCode.RESOURCE_NOT_FOUND));
+        assertThat(tasks.findByTeamIdOrderByCreatedAtDesc(teamId)).isEmpty();
+        verifyNoInteractions(routing);
+    }
+
+    @Test
+    void requesterFromAnotherTeamDoesNotCreateTask() {
+        Long otherTeamId = teams.save(Team.create("Other", UUID.randomUUID().toString())).getId();
+        Long otherAgentId = agents.save(Agent.create(otherTeamId, userId, "Other", null,
+                ToolType.CODEX, "project")).getId();
+        assertThatThrownBy(() -> service.create(teamId, otherAgentId, request))
+                .isInstanceOfSatisfying(BusinessException.class,
+                        error -> assertThat(error.getErrorCode()).isEqualTo(ErrorCode.RESOURCE_NOT_FOUND));
+        assertThat(tasks.findByTeamIdOrderByCreatedAtDesc(teamId)).isEmpty();
+        verifyNoInteractions(routing);
+    }
+
+    @Test
+    void sameOwnerAndKeyWithDifferentRequesterConflicts() {
+        service.create(teamId, agentId, request);
+        Long otherAgentId = agents.save(Agent.create(teamId, userId, "Other", null,
+                ToolType.CODEX, "project")).getId();
+        assertThatThrownBy(() -> service.create(teamId, otherAgentId, request))
+                .isInstanceOfSatisfying(BusinessException.class,
+                        error -> assertThat(error.getErrorCode()).isEqualTo(ErrorCode.REQUEST_KEY_CONFLICT));
+        assertThat(tasks.findByTeamIdOrderByCreatedAtDesc(teamId)).hasSize(1);
+        verify(routing, times(1)).sendTask(anyLong());
+    }
+
+    @Test
     void missingReceiverDoesNotCreateTask() {
-        var invalid = new CreateTaskRequest(request.requestKey(), agentId, Long.MAX_VALUE, "Prompt");
-        assertThatThrownBy(() -> service.create(teamId, userId, invalid))
+        var invalid = new CreateTaskRequest(request.requestKey(), Long.MAX_VALUE, "Prompt");
+        assertThatThrownBy(() -> service.create(teamId, agentId, invalid))
                 .isInstanceOfSatisfying(BusinessException.class,
                         error -> assertThat(error.getErrorCode()).isEqualTo(ErrorCode.RESOURCE_NOT_FOUND));
         assertThat(tasks.findByRequesterUserIdAndRequestKey(userId, request.requestKey())).isEmpty();
@@ -230,9 +274,9 @@ class TaskCreationIntegrationTest extends AbstractIntegrationTest {
 
     @Test
     void sameKeyWithDifferentPayloadConflicts() {
-        service.create(teamId, userId, request);
-        var changed = new CreateTaskRequest(request.requestKey(), agentId, agentId, "Different prompt");
-        assertThatThrownBy(() -> service.create(teamId, userId, changed))
+        service.create(teamId, agentId, request);
+        var changed = new CreateTaskRequest(request.requestKey(), agentId, "Different prompt");
+        assertThatThrownBy(() -> service.create(teamId, agentId, changed))
                 .isInstanceOfSatisfying(BusinessException.class,
                         error -> assertThat(error.getErrorCode()).isEqualTo(ErrorCode.REQUEST_KEY_CONFLICT));
     }
@@ -247,8 +291,8 @@ class TaskCreationIntegrationTest extends AbstractIntegrationTest {
             return java.util.Optional.empty();
         }).when(tasks).findByRequesterUserIdAndRequestKey(userId, request.requestKey());
         try (var executor = Executors.newFixedThreadPool(2)) {
-            var first = executor.submit(() -> service.create(teamId, userId, request));
-            var second = executor.submit(() -> service.create(teamId, userId, request));
+            var first = executor.submit(() -> service.create(teamId, agentId, request));
+            var second = executor.submit(() -> service.create(teamId, agentId, request));
             int successes = 0;
             int conflicts = 0;
             for (var future : java.util.List.of(first, second)) {
