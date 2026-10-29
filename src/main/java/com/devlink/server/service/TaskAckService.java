@@ -1,6 +1,17 @@
 package com.devlink.server.service;
 
 import java.time.Duration;
+import java.time.LocalDateTime;
+import com.devlink.server.common.BusinessException;
+import com.devlink.server.common.ErrorCode;
+import com.devlink.server.domain.task.Task;
+import com.devlink.server.domain.taskevent.TaskEvent;
+import com.devlink.server.domain.taskevent.TaskEventType;
+import com.devlink.server.repository.TaskRepository;
+import com.devlink.server.repository.TaskEventRepository;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionTemplate;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
@@ -20,27 +31,36 @@ import org.springframework.stereotype.Service;
 import org.springframework.util.Assert;
 import org.springframework.web.socket.WebSocketSession;
 
-/** 전송 시도별 ACK 대기를 메모리에 관리한다. 작업 상태·전달 이력의 DB 저장은 여기서 하지 않는다. */
+/** 전송 시도별 ACK 대기를 메모리에 관리한다. 검증된 ACK와 종료 결과를 별도 트랜잭션으로 기록한다. */
 @Service
 public class TaskAckService {
     private static final Logger log = LoggerFactory.getLogger(TaskAckService.class);
     private final ConcurrentMap<String, PendingAck> pending = new ConcurrentHashMap<>();
     private final ConnectionRegistry connections;
     private final ApplicationEventPublisher events;
+    private final TaskRepository tasks;
+    private final TaskEventRepository history;
+    private final TransactionTemplate transaction;
     private final long timeoutNanos;
     private final LongSupplier nanoTime;
 
     @Autowired
     public TaskAckService(ConnectionRegistry connections, ApplicationEventPublisher events,
+            TaskRepository tasks, TaskEventRepository history, PlatformTransactionManager transactionManager,
             @Value("${devlink.broker.ack-timeout-ms:5000}") long timeoutMillis) {
-        this(connections, events, timeoutMillis, System::nanoTime);
+        this(connections, events, tasks, history, transactionManager, timeoutMillis, System::nanoTime);
     }
 
     TaskAckService(ConnectionRegistry connections, ApplicationEventPublisher events,
+            TaskRepository tasks, TaskEventRepository history, PlatformTransactionManager transactionManager,
             long timeoutMillis, LongSupplier nanoTime) {
         Assert.isTrue(timeoutMillis > 0, "ack timeout must be positive");
         this.connections = connections;
         this.events = events;
+        this.tasks = tasks;
+        this.history = history;
+        this.transaction = new TransactionTemplate(transactionManager);
+        this.transaction.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
         this.timeoutNanos = Duration.ofMillis(timeoutMillis).toNanos();
         this.nanoTime = nanoTime;
     }
@@ -121,6 +141,12 @@ public class TaskAckService {
     }
 
     private void complete(PendingAck waiting, Status status) {
+        try {
+            saveAckResult(waiting, status);
+        } catch (RuntimeException exception) {
+            log.error("Failed to record ACK result: taskId={}, eventId={}, status={}",
+                    waiting.taskId, waiting.eventId, status, exception);
+        }
         var result = new TaskAckResult(waiting.taskId, waiting.eventId, waiting.session.getId(), status);
         waiting.result.complete(result);
         try {
@@ -128,6 +154,27 @@ public class TaskAckService {
         } catch (RuntimeException exception) {
             log.error("Failed to publish ACK result for event {}", waiting.eventId, exception);
         }
+    }
+
+    private void saveAckResult(PendingAck waiting, Status status) {
+        // 전송 실패는 생성 서비스가 TRANSPORT_ERROR로 기록한다.
+        if (status == Status.SEND_FAILED) return;
+        transaction.executeWithoutResult(tx -> {
+            Task task = tasks.findByIdForUpdate(waiting.taskId)
+                    .orElseThrow(() -> new BusinessException(ErrorCode.RESOURCE_NOT_FOUND));
+            if (history.existsByTaskIdAndEventType(waiting.taskId, TaskEventType.ACK_RECEIVED)) return;
+            switch (status) {
+                case ACKNOWLEDGED -> {
+                    task.markDelivered(LocalDateTime.now());
+                    history.save(TaskEvent.of(waiting.taskId, TaskEventType.ACK_RECEIVED, null));
+                }
+                case TIMED_OUT -> history.save(TaskEvent.of(
+                        waiting.taskId, TaskEventType.DELIVERY_UNKNOWN, "ACK_TIMEOUT"));
+                case CONNECTION_CLOSED -> history.save(TaskEvent.of(
+                        waiting.taskId, TaskEventType.DELIVERY_UNKNOWN, "CONNECTION_CLOSED"));
+                case SEND_FAILED -> { }
+            }
+        });
     }
 
     private static final class PendingAck {

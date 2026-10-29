@@ -1,5 +1,7 @@
 package com.devlink.server.service;
 
+import static com.devlink.server.AckTestDependencies.*;
+
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -35,7 +37,11 @@ class TaskAckServiceTest {
     private final ConnectionRegistry connections = new ConnectionRegistry();
     private final ApplicationEventPublisher events = mock(ApplicationEventPublisher.class);
     private final AtomicLong clock = new AtomicLong();
-    private final TaskAckService acknowledgements = new TaskAckService(connections, events, 5000, clock::get);
+    private final com.devlink.server.repository.TaskRepository tasks = tasks();
+    private final com.devlink.server.repository.TaskEventRepository history = history();
+    private final org.springframework.transaction.PlatformTransactionManager transactions = transactionManager();
+    private final TaskAckService acknowledgements = new TaskAckService(
+            connections, events, tasks, history, transactions, 5000, clock::get);
     private final AgentPrincipal receiver = new AgentPrincipal(11, 21, 31);
 
     @Test
@@ -241,6 +247,55 @@ class TaskAckServiceTest {
         clock.incrementAndGet();
         acknowledgements.checkTimeouts();
         assertThat(result.get().toCompletableFuture().join().status()).isEqualTo(Status.TIMED_OUT);
+    }
+
+    @Test
+    void validAckLocksTaskAndRecordsDeliveryBeforeCompleting() {
+        WebSocketSession session = session("first");
+        var task = mock(com.devlink.server.domain.task.Task.class);
+        when(tasks.findByIdForUpdate(7L)).thenReturn(java.util.Optional.of(task));
+        var result = acknowledgements.register(7, "event", receiver, session).toCompletableFuture();
+        acknowledgements.acknowledge(receiver, session, 7, "event");
+        var order = org.mockito.Mockito.inOrder(tasks, task, history, transactions, events);
+        order.verify(tasks).findByIdForUpdate(7L);
+        order.verify(history).existsByTaskIdAndEventType(7L,
+                com.devlink.server.domain.taskevent.TaskEventType.ACK_RECEIVED);
+        order.verify(task).markDelivered(any());
+        order.verify(history).save(org.mockito.ArgumentMatchers.argThat(event ->
+                event.getEventType() == com.devlink.server.domain.taskevent.TaskEventType.ACK_RECEIVED
+                        && event.getContent() == null));
+        order.verify(transactions).commit(any());
+        order.verify(events).publishEvent(any(TaskAckResult.class));
+        assertThat(result.join().status()).isEqualTo(Status.ACKNOWLEDGED);
+    }
+
+    @Test
+    void existingAcknowledgementPreventsTimeoutHistory() {
+        WebSocketSession session = session("first");
+        when(history.existsByTaskIdAndEventType(7L,
+                com.devlink.server.domain.taskevent.TaskEventType.ACK_RECEIVED)).thenReturn(true);
+        acknowledgements.register(7, "event", receiver, session);
+        clock.set(Duration.ofSeconds(5).toNanos());
+        acknowledgements.checkTimeouts();
+        verify(history, org.mockito.Mockito.never()).save(any());
+    }
+
+    @Test
+    void ackCommitFailureDoesNotLeaveFutureIncomplete() {
+        WebSocketSession session = session("first");
+        doThrow(new IllegalStateException("commit failed")).when(transactions).commit(any());
+        var result = acknowledgements.register(7, "event", receiver, session).toCompletableFuture();
+        assertThat(acknowledgements.acknowledge(receiver, session, 7, "event")).isTrue();
+        assertThat(result.join().status()).isEqualTo(Status.ACKNOWLEDGED);
+        verify(events).publishEvent(any(TaskAckResult.class));
+    }
+
+    @Test
+    void sendFailureDoesNotWriteDuplicateHistory() {
+        WebSocketSession session = session("first");
+        acknowledgements.register(7, "event", receiver, session);
+        acknowledgements.sendFailed("event", session);
+        org.mockito.Mockito.verifyNoInteractions(tasks, history, transactions);
     }
 
     private WebSocketSession session(String id) {
