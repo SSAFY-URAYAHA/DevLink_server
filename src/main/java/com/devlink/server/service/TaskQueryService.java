@@ -1,6 +1,7 @@
 package com.devlink.server.service;
 
 import org.springframework.stereotype.Service;
+import com.devlink.server.dto.task.TaskFileResponse;
 import com.devlink.server.common.BusinessException;
 import com.devlink.server.dto.task.TaskListRequest;
 import com.devlink.server.common.ErrorCode;
@@ -25,6 +26,11 @@ import java.util.HashSet;
 import com.devlink.server.dto.task.TaskListResponse;
 import java.util.ArrayList;
 import org.springframework.transaction.annotation.Transactional;
+import com.devlink.server.repository.TaskFileRepository;
+import com.devlink.server.repository.TaskEventRepository;
+import com.devlink.server.dto.task.TaskEventResponse;
+import com.devlink.server.domain.task.TaskStatus;
+import com.devlink.server.dto.task.TaskDetailResponse;
 
 @Service
 @RequiredArgsConstructor
@@ -34,6 +40,8 @@ public class TaskQueryService {
 	private final TeamMemberRepository teamMemberRepository;
 	private final AgentRepository agentRepository;
 	private final TaskRepository taskRepository;
+	private final TaskFileRepository taskFileRepository;
+	private final TaskEventRepository taskEventRepository;
 	
 	@Transactional(readOnly = true)
 	public TaskListResponse getTasks(
@@ -52,6 +60,129 @@ public class TaskQueryService {
 	    );
 
 	    return toListResponse(taskPage);
+	}
+	
+	@Transactional(readOnly = true)
+	public TaskDetailResponse getTask(
+	        Long taskId,
+	        AgentPrincipal agent
+	) {
+	    validateAgent(agent);
+
+	    Task task = findTask(taskId);
+
+	    validateTeam(task.getTeamId(), agent);
+
+	    Map<Long, Agent> agentsById = findAgents(List.of(task));
+
+	    Agent requesterAgent = agentsById.get(
+	            task.getRequesterAgentId()
+	    );
+
+	    Agent receiverAgent = agentsById.get(
+	            task.getReceiverAgentId()
+	    );
+
+	    if (requesterAgent == null || receiverAgent == null) {
+	        throw new BusinessException(
+	                ErrorCode.INTERNAL_SERVER_ERROR
+	        );
+	    }
+
+	    List<TaskFileResponse> taskFiles = findTaskFiles(taskId);
+	    List<TaskEventResponse> events = findTaskEvents(taskId);
+
+	    return toDetailResponse(
+	            task,
+	            requesterAgent,
+	            receiverAgent,
+	            taskFiles,
+	            events
+	    );
+	}
+	
+	private TaskDetailResponse toDetailResponse(
+	        Task task,
+	        Agent requesterAgent,
+	        Agent receiverAgent,
+	        List<TaskFileResponse> taskFiles,
+	        List<TaskEventResponse> events
+	) {
+	    TaskStatus status = task.getStatus();
+
+	    String resultText = status == TaskStatus.COMPLETED
+	            ? task.getResultText() : null;
+
+	    String failureReason = status == TaskStatus.FAILED
+	            ? task.getResultText() : null;
+
+	    String rejectionReason = status == TaskStatus.REJECTED
+	            ? task.getResultText() : null;
+
+	    boolean partiallyModified = status == TaskStatus.FAILED
+	            && task.isPartiallyModified();
+
+	    return new TaskDetailResponse(
+	            task.getId(),
+	            task.getTeamId(),
+	            new TaskAgentResponse(
+	                    requesterAgent.getId(),
+	                    requesterAgent.getName()
+	            ),
+	            new TaskAgentResponse(
+	                    receiverAgent.getId(),
+	                    receiverAgent.getName()
+	            ),
+	            task.getPrompt(),
+	            status,
+	            task.getVersion(),
+	            resultText,
+	            failureReason,
+	            rejectionReason,
+	            partiallyModified,
+	            taskFiles,
+	            events,
+	            task.getCreatedAt(),
+	            task.getStartedAt(),
+	            task.getCompletedAt()
+	    );
+	}
+	
+	private List<TaskFileResponse> findTaskFiles(Long taskId) {
+	    return taskFileRepository.findByTaskId(taskId)
+	            .stream()
+	            .map(file -> new TaskFileResponse(
+	                    file.getId(),
+	                    file.getRelativePath(),
+	                    file.getChangeType(),
+	                    file.getDiffText()
+	            ))
+	            .toList();
+	}
+	
+	private List<TaskEventResponse> findTaskEvents(Long taskId) {
+	    return taskEventRepository
+	            .findByTaskIdOrderByCreatedAtAsc(taskId)
+	            .stream()
+	            .map(event -> new TaskEventResponse(
+	                    event.getEventType(),
+	                    event.getContent(),
+	                    event.getCreatedAt()
+	            ))
+	            .toList();
+	}
+	
+	private Task findTask(Long taskId) {
+	    if (taskId == null || taskId <= 0) {
+	        throw new BusinessException(
+	                ErrorCode.VALIDATION_FAILED
+	        );
+	    }
+
+	    return taskRepository.findById(taskId)
+	            .orElseThrow(() -> new BusinessException(
+	                    ErrorCode.RESOURCE_NOT_FOUND
+	            ));
 	}
 	
 	private TaskListResponse toListResponse(Page<Task> taskPage) {

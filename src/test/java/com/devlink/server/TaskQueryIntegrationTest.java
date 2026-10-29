@@ -22,12 +22,18 @@ import com.devlink.server.domain.agent.Agent;
 import com.devlink.server.domain.agent.ToolType;
 import com.devlink.server.domain.task.Task;
 import com.devlink.server.domain.task.TaskStatus;
+import com.devlink.server.domain.taskevent.TaskEvent;
+import com.devlink.server.domain.taskevent.TaskEventType;
+import com.devlink.server.domain.taskfile.ChangeType;
+import com.devlink.server.domain.taskfile.TaskFile;
 import com.devlink.server.domain.team.Team;
 import com.devlink.server.domain.teammember.MemberRole;
 import com.devlink.server.domain.teammember.TeamMember;
 import com.devlink.server.domain.user.User;
 import com.devlink.server.repository.AgentRepository;
 import com.devlink.server.repository.TaskRepository;
+import com.devlink.server.repository.TaskFileRepository;
+import com.devlink.server.repository.TaskEventRepository;
 import com.devlink.server.repository.TeamMemberRepository;
 import com.devlink.server.repository.TeamRepository;
 import com.devlink.server.repository.UserRepository;
@@ -56,6 +62,8 @@ class TaskQueryIntegrationTest extends AbstractIntegrationTest {
     @Autowired private TeamMemberRepository members;
     @Autowired private AgentRepository agents;
     @Autowired private TaskRepository tasks;
+    @Autowired private TaskFileRepository taskFiles;
+    @Autowired private TaskEventRepository taskEvents;
     @Autowired private PasswordEncoder passwordEncoder;
     @Autowired private PlatformTransactionManager transactionManager;
     @Autowired private JdbcTemplate jdbc;
@@ -292,14 +300,7 @@ class TaskQueryIntegrationTest extends AbstractIntegrationTest {
         try (HttpClient client = HttpClient.newBuilder()
                 .cookieHandler(new CookieManager(null, CookiePolicy.ACCEPT_ALL)).build()) {
             // 다른 팀 사용자의 실제 로그인 세션을 만들어 Agent 인증과 분리되는지 확인한다.
-            JsonNode csrf = assertSuccess(client.send(request("/api/v1/auth/csrf").GET().build(),
-                    HttpResponse.BodyHandlers.ofString()));
-            var login = request("/api/v1/auth/login")
-                    .header(csrf.path("headerName").asText(), csrf.path("token").asText())
-                    .header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(
-                            Map.of("email", outsider.getEmail(), "password", TEST_PASSWORD)))).build();
-            assertSuccess(client.send(login, HttpResponse.BodyHandlers.ofString()));
+            loginAs(client, outsider);
 
             assertCurrentUser(client, outsider.getId());
             assertError(client.send(request(listPath(team.getId())).GET().build(),
@@ -313,6 +314,291 @@ class TaskQueryIntegrationTest extends AbstractIntegrationTest {
                     "sentFailed", "sentCompleted", "sentInProgress", "sentPending");
             assertCurrentUser(client, outsider.getId());
         }
+    }
+
+    @Test
+    void returnsCompletedTaskDetail() throws Exception {
+        Long taskId = taskIds.get("sentCompleted");
+        JsonNode data = assertSuccess(get(detailPath(taskId), callerAgent.token()));
+
+        assertThat(data.path("taskId").asLong()).isEqualTo(taskId);
+        assertThat(data.path("teamId").asLong()).isEqualTo(team.getId());
+        assertThat(data.path("prompt").asText()).isEqualTo("목록 조회 테스트: sentCompleted");
+        assertDetailAgent(data.path("requesterAgent"), callerAgent);
+        assertDetailAgent(data.path("receiverAgent"), teammateAgent);
+        assertThat(data.path("status").asText()).isEqualTo("COMPLETED");
+        assertThat(data.path("resultText").asText()).isEqualTo("테스트 작업 완료");
+        assertThat(data.path("failureReason").isNull()).isTrue();
+        assertThat(data.path("rejectionReason").isNull()).isTrue();
+        assertThat(data.path("partiallyModified").isBoolean()).isTrue();
+        assertThat(data.path("partiallyModified").asBoolean()).isFalse();
+        assertThat(data.path("version").isIntegralNumber()).isTrue();
+        assertThat(data.path("version").asLong())
+                .isEqualTo(tasks.findById(taskId).orElseThrow().getVersion());
+        assertEmptyArray(data.path("taskFiles"));
+        assertEmptyArray(data.path("events"));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"sentPending,PENDING,0,false,false", "sentInProgress,IN_PROGRESS,1,true,false",
+            "sentCompleted,COMPLETED,2,true,true", "sentFailed,FAILED,3,true,true",
+            "sentRejected,REJECTED,4,false,true"})
+    void returnsDetailFieldsForEveryStatus(String label, String status, int minute,
+            boolean hasStarted, boolean hasCompleted) throws Exception {
+        JsonNode data = assertSuccess(get(detailPath(taskIds.get(label)), callerAgent.token()));
+
+        assertThat(data.path("status").asText()).isEqualTo(status);
+        assertNullableText(data.path("resultText"),
+                "COMPLETED".equals(status) ? "테스트 작업 완료" : null);
+        assertNullableText(data.path("failureReason"),
+                "FAILED".equals(status) ? "테스트 작업 실패" : null);
+        assertNullableText(data.path("rejectionReason"),
+                "REJECTED".equals(status) ? "테스트 작업 거절" : null);
+        assertThat(data.path("partiallyModified").isBoolean()).isTrue();
+        assertThat(data.path("partiallyModified").asBoolean()).isEqualTo("FAILED".equals(status));
+        LocalDateTime createdAt = BASE_TIME.plusMinutes(minute);
+        assertTimestamp(data.path("createdAt"), createdAt);
+        assertTimestamp(data.path("startedAt"), hasStarted ? createdAt.plusSeconds(10) : null);
+        assertTimestamp(data.path("completedAt"), hasCompleted ? createdAt.plusSeconds(20) : null);
+        assertEmptyArray(data.path("taskFiles"));
+        assertEmptyArray(data.path("events"));
+    }
+
+    @Test
+    void returnsFalseWhenFailedTaskHasNoPartialChanges() throws Exception {
+        new TransactionTemplate(transactionManager).executeWithoutResult(tx ->
+                createTask("failedWithoutChanges", callerAgent, teammateAgent, TaskStatus.FAILED, false));
+
+        JsonNode data = assertSuccess(get(detailPath(taskIds.get("failedWithoutChanges")), callerAgent.token()));
+
+        assertThat(data.path("status").asText()).isEqualTo("FAILED");
+        assertThat(data.path("partiallyModified").asBoolean()).isFalse();
+        assertThat(data.path("failureReason").asText()).isEqualTo("테스트 작업 실패");
+        assertThat(data.path("resultText").isNull()).isTrue();
+        assertThat(data.path("rejectionReason").isNull()).isTrue();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"requester", "receiver", "sameOwner", "nonParticipant"})
+    void allowsEveryAuthorizedAgentInSameTeamToReadDetail(String caller) throws Exception {
+        TestAgent requestingAgent = switch (caller) {
+            case "requester" -> callerAgent;
+            case "receiver" -> teammateAgent;
+            case "sameOwner" -> sameOwnerAgent;
+            case "nonParticipant" -> emptyAgent;
+            default -> throw new IllegalArgumentException(caller);
+        };
+        Long taskId = taskIds.get("sentCompleted");
+
+        JsonNode data = assertSuccess(get(detailPath(taskId), requestingAgent.token()));
+
+        assertThat(data.path("taskId").asLong()).isEqualTo(taskId);
+        assertDetailAgent(data.path("requesterAgent"), callerAgent);
+        assertDetailAgent(data.path("receiverAgent"), teammateAgent);
+    }
+
+    @Test
+    void returnsDetailForSelfDirectedTask() throws Exception {
+        Long taskId = taskIds.get("selfPending");
+        JsonNode data = assertSuccess(get(detailPath(taskId), callerAgent.token()));
+
+        assertThat(data.path("taskId").asLong()).isEqualTo(taskId);
+        assertDetailAgent(data.path("requesterAgent"), callerAgent);
+        assertDetailAgent(data.path("receiverAgent"), callerAgent);
+    }
+
+    @Test
+    void returnsOnlyRequestedTaskFilesWithEveryChangeType() throws Exception {
+        Long taskId = taskIds.get("sentCompleted");
+        List<TaskFile> expectedFiles = new ArrayList<>();
+        new TransactionTemplate(transactionManager).executeWithoutResult(tx -> {
+            for (ChangeType type : ChangeType.values()) {
+                expectedFiles.add(taskFiles.saveAndFlush(TaskFile.of(taskId,
+                        "src/변경-" + type.name() + ".java", type,
+                        type == ChangeType.DELETED ? null : "- 이전 코드\n+ 변경 코드")));
+            }
+            taskFiles.saveAndFlush(TaskFile.of(taskIds.get("receivedCompleted"),
+                    "src/unrelated.java", ChangeType.ADDED, "같은 팀의 다른 작업"));
+            taskFiles.saveAndFlush(TaskFile.of(taskIds.get("otherTeamPending"),
+                    "src/other-team.java", ChangeType.MODIFIED, "다른 팀의 작업"));
+        });
+
+        JsonNode files = assertSuccess(get(detailPath(taskId), callerAgent.token())).path("taskFiles");
+
+        assertThat(files.isArray()).isTrue();
+        List<Long> returnedIds = new ArrayList<>();
+        files.forEach(file -> returnedIds.add(file.path("fileId").asLong()));
+        assertThat(returnedIds).containsExactlyInAnyOrderElementsOf(
+                expectedFiles.stream().map(TaskFile::getId).toList());
+        for (TaskFile expected : expectedFiles) {
+            JsonNode file = null;
+            for (JsonNode candidate : files) {
+                if (candidate.path("fileId").asLong() == expected.getId()) {
+                    file = candidate;
+                    break;
+                }
+            }
+            assertThat(file).isNotNull();
+            assertThat(file.path("relativePath").asText()).isEqualTo(expected.getRelativePath());
+            assertThat(file.path("changeType").asText()).isEqualTo(expected.getChangeType().name());
+            assertNullableText(file.path("diffText"), expected.getDiffText());
+        }
+    }
+
+    @Test
+    void returnsOnlyRequestedTaskEventsInChronologicalOrder() throws Exception {
+        Long taskId = taskIds.get("sentCompleted");
+        LocalDateTime createdAt = BASE_TIME.plusMinutes(2);
+        new TransactionTemplate(transactionManager).executeWithoutResult(tx -> {
+            // 저장 순서와 발생 시각을 다르게 만들어 DB 정렬을 확인한다.
+            createEvent(taskId, TaskEventType.STATUS_CHANGED, "IN_PROGRESS → COMPLETED", createdAt.plusSeconds(20));
+            createEvent(taskId, TaskEventType.CREATED, "작업 생성", createdAt);
+            createEvent(taskId, TaskEventType.ACK_RECEIVED, null, createdAt.plusSeconds(5));
+            createEvent(taskId, TaskEventType.PROGRESS, "진행률 50%", createdAt.plusSeconds(15));
+            createEvent(taskIds.get("receivedCompleted"), TaskEventType.CREATED, "다른 작업", createdAt);
+            createEvent(taskIds.get("otherTeamPending"), TaskEventType.CREATED, "다른 팀", createdAt);
+        });
+
+        JsonNode events = assertSuccess(get(detailPath(taskId), callerAgent.token())).path("events");
+
+        assertThat(events.isArray()).isTrue();
+        assertThat(events.size()).isEqualTo(4);
+        assertDetailEvent(events.get(0), TaskEventType.CREATED, "작업 생성", createdAt);
+        assertDetailEvent(events.get(1), TaskEventType.ACK_RECEIVED, null, createdAt.plusSeconds(5));
+        assertDetailEvent(events.get(2), TaskEventType.PROGRESS, "진행률 50%", createdAt.plusSeconds(15));
+        assertDetailEvent(events.get(3), TaskEventType.STATUS_CHANGED, "IN_PROGRESS → COMPLETED", createdAt.plusSeconds(20));
+    }
+
+    @Test
+    void rejectsDetailWithoutAgentToken() throws Exception {
+        assertError(get(detailPath(taskIds.get("sentCompleted")), null), 401, "AUTHENTICATION_REQUIRED");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"Bearer unknown-token", "Basic credentials", "Bearer", "Bearer first second"})
+    void rejectsInvalidDetailAuthorizationHeader(String authorization) throws Exception {
+        try (HttpClient client = HttpClient.newHttpClient()) {
+            var request = request(detailPath(taskIds.get("sentCompleted")))
+                    .header("Authorization", authorization).GET().build();
+            assertError(client.send(request, HttpResponse.BodyHandlers.ofString()),
+                    401, "AUTHENTICATION_REQUIRED");
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"0", "-1", "abc", "9223372036854775808"})
+    void rejectsInvalidDetailTaskId(String taskId) throws Exception {
+        assertError(get("/api/v1/tasks/" + taskId, callerAgent.token()), 400, "VALIDATION_FAILED");
+    }
+
+    @Test
+    void returnsNotFoundForMissingDetailTask() throws Exception {
+        assertThat(tasks.existsById(Long.MAX_VALUE)).isFalse();
+
+        assertError(get(detailPath(Long.MAX_VALUE), callerAgent.token()), 404, "RESOURCE_NOT_FOUND");
+    }
+
+    @Test
+    void rejectsDetailAccessAcrossTeams() throws Exception {
+        assertError(get(detailPath(taskIds.get("sentCompleted")), otherTeamAgent.token()), 403, "ACCESS_DENIED");
+        assertError(get(detailPath(taskIds.get("otherTeamPending")), callerAgent.token()), 403, "ACCESS_DENIED");
+    }
+
+    @Test
+    void rejectsDetailWithRevokedToken() throws Exception {
+        jdbc.update("update agents set connection_token_hash = null where id = ?", callerAgent.id());
+
+        assertError(get(detailPath(taskIds.get("sentCompleted")), callerAgent.token()),
+                401, "AUTHENTICATION_REQUIRED");
+    }
+
+    @Test
+    void rejectsDetailWhenAgentOwnerHasLeftTeam() throws Exception {
+        jdbc.update("delete from team_members where team_id = ? and user_id = ?", team.getId(), owner.getId());
+
+        assertError(get(detailPath(taskIds.get("sentCompleted")), callerAgent.token()),
+                401, "AUTHENTICATION_REQUIRED");
+    }
+
+    @Test
+    void requiresDetailAgentTokenAndDoesNotReplaceUserSessionIdentity() throws Exception {
+        try (HttpClient client = HttpClient.newBuilder()
+                .cookieHandler(new CookieManager(null, CookiePolicy.ACCEPT_ALL)).build()) {
+            loginAs(client, outsider);
+            assertCurrentUser(client, outsider.getId());
+            String path = detailPath(taskIds.get("sentCompleted"));
+            assertError(client.send(request(path).GET().build(), HttpResponse.BodyHandlers.ofString()),
+                    401, "AUTHENTICATION_REQUIRED");
+            assertError(client.send(request(path).header("Authorization", "Bearer unknown-token").GET().build(),
+                    HttpResponse.BodyHandlers.ofString()), 401, "AUTHENTICATION_REQUIRED");
+
+            JsonNode data = assertSuccess(client.send(request(path)
+                    .header("Authorization", "Bearer " + callerAgent.token()).GET().build(),
+                    HttpResponse.BodyHandlers.ofString()));
+            assertThat(data.path("taskId").asLong()).isEqualTo(taskIds.get("sentCompleted"));
+            assertDetailAgent(data.path("requesterAgent"), callerAgent);
+            assertCurrentUser(client, outsider.getId());
+        }
+    }
+
+    @Test
+    void readingDetailDoesNotChangeTaskVersionOrCreateHistory() throws Exception {
+        Long taskId = taskIds.get("sentCompleted");
+        Map<String, Object> before = jdbc.queryForMap("select * from tasks where id = ?", taskId);
+
+        JsonNode first = assertSuccess(get(detailPath(taskId), callerAgent.token()));
+        JsonNode second = assertSuccess(get(detailPath(taskId), callerAgent.token()));
+
+        assertThat(second).isEqualTo(first);
+        assertThat(jdbc.queryForMap("select * from tasks where id = ?", taskId)).isEqualTo(before);
+        assertThat(taskFiles.findByTaskId(taskId)).isEmpty();
+        assertThat(taskEvents.findByTaskIdOrderByCreatedAtAsc(taskId)).isEmpty();
+    }
+
+    private void loginAs(HttpClient client, User user) throws Exception {
+        JsonNode csrf = assertSuccess(client.send(request("/api/v1/auth/csrf").GET().build(),
+                HttpResponse.BodyHandlers.ofString()));
+        var login = request("/api/v1/auth/login")
+                .header(csrf.path("headerName").asText(), csrf.path("token").asText())
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(
+                        Map.of("email", user.getEmail(), "password", TEST_PASSWORD)))).build();
+        assertSuccess(client.send(login, HttpResponse.BodyHandlers.ofString()));
+    }
+
+    private String detailPath(Long taskId) {
+        return "/api/v1/tasks/" + taskId;
+    }
+
+    private void assertDetailAgent(JsonNode agent, TestAgent expected) {
+        assertThat(agent.path("agentId").asLong()).isEqualTo(expected.id());
+        assertThat(agent.path("name").asText()).isEqualTo(expected.name());
+    }
+
+    private void assertEmptyArray(JsonNode value) {
+        assertThat(value.isArray()).isTrue();
+        assertThat(value.size()).isZero();
+    }
+
+    private void assertNullableText(JsonNode value, String expected) {
+        if (expected == null) {
+            assertThat(value.isNull()).isTrue();
+        } else {
+            assertThat(value.isTextual()).isTrue();
+            assertThat(value.asText()).isEqualTo(expected);
+        }
+    }
+
+    private void assertDetailEvent(JsonNode event, TaskEventType type, String message, LocalDateTime createdAt) {
+        assertThat(event.path("eventType").asText()).isEqualTo(type.name());
+        assertNullableText(event.path("message"), message);
+        assertThat(event.has("content")).isFalse();
+        assertTimestamp(event.path("createdAt"), createdAt);
+    }
+
+    private void createEvent(Long taskId, TaskEventType type, String content, LocalDateTime createdAt) {
+        TaskEvent event = taskEvents.saveAndFlush(TaskEvent.of(taskId, type, content));
+        jdbc.update("update task_events set created_at = ? where id = ?", Timestamp.valueOf(createdAt), event.getId());
     }
 
     private void assertCurrentUser(HttpClient client, Long userId) throws Exception {
@@ -458,6 +744,11 @@ class TaskQueryIntegrationTest extends AbstractIntegrationTest {
     }
 
     private void createTask(String label, TestAgent requester, TestAgent receiver, TaskStatus status) {
+        createTask(label, requester, receiver, status, true);
+    }
+
+    private void createTask(String label, TestAgent requester, TestAgent receiver,
+            TaskStatus status, boolean partiallyModified) {
         Task task = tasks.saveAndFlush(Task.create(
                 UUID.randomUUID().toString(), requester.teamId(), requester.id(),
                 requester.ownerUserId(), receiver.id(), "목록 조회 테스트: " + label));
@@ -470,7 +761,7 @@ class TaskQueryIntegrationTest extends AbstractIntegrationTest {
         }
         switch (status) {
             case COMPLETED -> task.complete(receiver.id(), "테스트 작업 완료");
-            case FAILED -> task.fail(receiver.id(), "테스트 작업 실패", true);
+            case FAILED -> task.fail(receiver.id(), "테스트 작업 실패", partiallyModified);
             case REJECTED -> task.reject(receiver.id(), "테스트 작업 거절");
             case PENDING, IN_PROGRESS -> { }
         }
