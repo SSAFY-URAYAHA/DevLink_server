@@ -55,6 +55,8 @@ import static org.awaitility.Awaitility.await;
 class TaskAckIntegrationTest extends AbstractIntegrationTest {
     @Autowired private TaskRoutingService routing;
     @Autowired private TaskRepository tasks;
+    @org.springframework.test.context.bean.override.mockito.MockitoSpyBean
+    private com.devlink.server.repository.TaskEventRepository history;
     @Autowired private AgentRepository agents;
     @Autowired private TeamRepository teams;
     @Autowired private UserRepository users;
@@ -95,7 +97,7 @@ class TaskAckIntegrationTest extends AbstractIntegrationTest {
             broker.barrier();
             assertThat(ackResults.results).isEmpty();
             assertThat(connections.findByAgentId(receiver.getId().toString())).isPresent();
-            assertUnchangedTask(task.getId());
+            assertAcknowledgedTask(task.getId());
         }
     }
 
@@ -117,7 +119,7 @@ class TaskAckIntegrationTest extends AbstractIntegrationTest {
 
             broker.ack(task.getId(), sent.eventId());
             assertThat(nextResult().status()).isEqualTo(Status.ACKNOWLEDGED);
-            assertUnchangedTask(task.getId());
+            assertAcknowledgedTask(task.getId());
         }
     }
 
@@ -179,6 +181,33 @@ class TaskAckIntegrationTest extends AbstractIntegrationTest {
     private Task saveTask() {
         return tasks.save(Task.create(UUID.randomUUID().toString(), teamId, requester.getId(),
                 requester.getOwnerUserId(), receiver.getId(), "ACK 테스트 작업"));
+    }
+
+    private void assertAcknowledgedTask(long taskId) {
+        Task task = tasks.findById(taskId).orElseThrow();
+        assertThat(task.getStatus()).isEqualTo(TaskStatus.PENDING);
+        assertThat(task.getDeliveredAt()).isNotNull();
+        assertThat(task.getVersion()).isEqualTo(1L);
+        assertThat(history.findByTaskIdOrderByCreatedAtAsc(taskId))
+                .extracting(com.devlink.server.domain.taskevent.TaskEvent::getEventType)
+                .containsExactly(com.devlink.server.domain.taskevent.TaskEventType.ACK_RECEIVED);
+    }
+
+    @Test
+    void ackHistoryFailureRollsBackDeliveredAtButCompletesObservedResult() throws Exception {
+        org.mockito.Mockito.doThrow(new IllegalStateException("ACK history failed"))
+                .when(history).save(org.mockito.ArgumentMatchers.argThat(event -> event.getEventType()
+                        == com.devlink.server.domain.taskevent.TaskEventType.ACK_RECEIVED));
+        try (var client = HttpClient.newHttpClient(); var broker = connect(client, "receiver", receiver)) {
+            broker.online();
+            Task task = saveTask();
+            var sent = routing.sendTask(task.getId());
+            broker.next();
+            broker.ack(task.getId(), sent.eventId());
+            assertThat(nextResult().status()).isEqualTo(Status.ACKNOWLEDGED);
+            assertUnchangedTask(task.getId());
+            assertThat(history.findByTaskIdOrderByCreatedAtAsc(task.getId())).isEmpty();
+        }
     }
 
     private void assertUnchangedTask(long taskId) {

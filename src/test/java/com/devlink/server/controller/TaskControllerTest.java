@@ -52,7 +52,7 @@ class TaskControllerTest {
                 .andExpect(jsonPath("$.data.taskId").value(101))
                 .andExpect(jsonPath("$.data.status").value("PENDING"))
                 .andExpect(jsonPath("$.data.version").value(0))
-                .andExpect(jsonPath("$.data.delivery.status").value("DELIVERY_FAILED"))
+                .andExpect(jsonPath("$.data.delivery.status").value("DELIVERY_NOT_SENT"))
                 .andExpect(jsonPath("$.data.delivery.reasonCode").value("RECEIVER_OFFLINE"));
         verify(service).create(1L, 3L, valid);
     }
@@ -61,11 +61,11 @@ class TaskControllerTest {
     void successfulDeliveryReturnsDeliveredWithoutReason() throws Exception {
         when(service.create(anyLong(), anyLong(), any())).thenReturn(
                 new CreateTaskResponse(101L, 4L, TaskStatus.PENDING, 1L, false,
-                        new TaskDeliveryResult(TaskEventType.DELIVERED, null)));
+                        new TaskDeliveryResult(TaskEventType.ACK_PENDING, null)));
         mvc.perform(post("/api/v1/tasks/1").sessionAttr("userId", 3L)
                         .contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(valid)))
                 .andExpect(status().isCreated())
-                .andExpect(jsonPath("$.data.delivery.status").value("DELIVERED"))
+                .andExpect(jsonPath("$.data.delivery.status").value("ACK_PENDING"))
                 .andExpect(jsonPath("$.data.delivery.reasonCode").value(org.hamcrest.Matchers.nullValue()));
     }
 
@@ -137,7 +137,7 @@ class TaskControllerTest {
 
     private CreateTaskResponse response(boolean replayed) {
         return new CreateTaskResponse(101L, 4L, TaskStatus.PENDING, 0L, replayed,
-                new TaskDeliveryResult(TaskEventType.DELIVERY_FAILED, "RECEIVER_OFFLINE"));
+                new TaskDeliveryResult(TaskEventType.DELIVERY_NOT_SENT, "RECEIVER_OFFLINE"));
     }
 
     @Test

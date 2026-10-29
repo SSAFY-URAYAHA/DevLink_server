@@ -1,5 +1,7 @@
 package com.devlink.server.service;
 
+import static com.devlink.server.AckTestDependencies.*;
+
 import java.io.IOException;
 import java.time.LocalDateTime;
 import java.util.List;
@@ -48,7 +50,7 @@ class TaskRoutingServiceTest {
     private final AgentPresenceService presence = mock(AgentPresenceService.class);
     private final BrokerMessageSender sender = new BrokerMessageSender(connections, mapper);
     private final ApplicationEventPublisher ackEvents = mock(ApplicationEventPublisher.class);
-    private final TaskAckService acknowledgements = new TaskAckService(connections, ackEvents, 5000);
+    private final TaskAckService acknowledgements = new TaskAckService(connections, ackEvents, tasks(), history(), transactionManager(), 5000);
     private final TaskRoutingService routing = new TaskRoutingService(
             tasks, agents, connections, sender, presence, acknowledgements);
     private final Task task = Task.create("request-key", 31L, 1L, 20L, 2L, "파일을 수정해 주세요");

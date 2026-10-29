@@ -1,5 +1,7 @@
 package com.devlink.server.handler;
 
+import static com.devlink.server.AckTestDependencies.*;
+
 import java.io.IOException;
 import java.util.List;
 import com.devlink.server.common.BusinessException;
@@ -41,7 +43,7 @@ class DevLinkWebSocketHandlerTest {
     private final ObjectMapper mapper = new ObjectMapper();
     private final AgentPresenceService presence = mock(AgentPresenceService.class);
     private final TaskAckService acknowledgements = new TaskAckService(
-            registry, mock(ApplicationEventPublisher.class), 5000);
+            registry, mock(ApplicationEventPublisher.class), tasks(), history(), transactionManager(), 5000);
     private final DevLinkWebSocketHandler handler = new DevLinkWebSocketHandler(
             registry, mapper, presence, new BrokerMessageSender(registry, mapper), acknowledgements);
 

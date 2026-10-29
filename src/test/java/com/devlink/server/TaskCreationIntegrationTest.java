@@ -62,24 +62,24 @@ class TaskCreationIntegrationTest extends AbstractIntegrationTest {
     }
 
     @Test
-    void routesAfterCreatedAndDeliveringCommitThenStoresDelivered() {
+    void routesAfterCreatedCommitThenStoresAckPending() {
         when(routing.sendTask(anyLong())).thenAnswer(invocation -> {
             assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
             Long taskId = invocation.getArgument(0);
             assertThat(tasks.findById(taskId)).isPresent();
             assertThat(events.findByTaskIdOrderByCreatedAtAsc(taskId))
-                    .extracting(TaskEvent::getEventType).containsExactly(TaskEventType.CREATED, TaskEventType.DELIVERING);
+                    .extracting(TaskEvent::getEventType).containsExactly(TaskEventType.CREATED);
             assertThat(service.create(teamId, userId, request).delivery()).isNull();
             return new TaskRoutingResult(taskId, TaskRoutingResult.Status.SENT, "event", "connection");
         });
         var result = service.create(teamId, userId, request);
         assertThat(result.replayed()).isFalse();
         assertThat(result.status()).isEqualTo(TaskStatus.PENDING);
-        assertThat(result.version()).isEqualTo(1L);
-        assertThat(result.delivery().status()).isEqualTo(TaskEventType.DELIVERED);
-        assertThat(tasks.findById(result.taskId()).orElseThrow().getDeliveredAt()).isNotNull();
+        assertThat(result.version()).isEqualTo(0L);
+        assertThat(result.delivery().status()).isEqualTo(TaskEventType.ACK_PENDING);
+        assertThat(tasks.findById(result.taskId()).orElseThrow().getDeliveredAt()).isNull();
         assertThat(events.findByTaskIdOrderByCreatedAtAsc(result.taskId()))
-                .extracting(TaskEvent::getEventType).containsExactly(TaskEventType.CREATED, TaskEventType.DELIVERING, TaskEventType.DELIVERED);
+                .extracting(TaskEvent::getEventType).containsExactly(TaskEventType.CREATED, TaskEventType.ACK_PENDING);
         verify(routing).sendTask(result.taskId());
     }
 
@@ -90,7 +90,7 @@ class TaskCreationIntegrationTest extends AbstractIntegrationTest {
         assertThat(replay.replayed()).isTrue();
         assertThat(replay.taskId()).isEqualTo(created.taskId());
         assertThat(tasks.findByTeamIdOrderByCreatedAtDesc(teamId)).hasSize(1);
-        assertThat(events.findByTaskIdOrderByCreatedAtAsc(created.taskId())).hasSize(3);
+        assertThat(events.findByTaskIdOrderByCreatedAtAsc(created.taskId())).hasSize(2);
         verify(routing, times(1)).sendTask(created.taskId());
     }
 
@@ -101,12 +101,12 @@ class TaskCreationIntegrationTest extends AbstractIntegrationTest {
         when(routing.sendTask(anyLong())).thenAnswer(invocation ->
                 new TaskRoutingResult(invocation.getArgument(0), status, null, null));
         var result = service.create(teamId, userId, request);
-        assertThat(result.delivery()).isEqualTo(new TaskDeliveryResult(TaskEventType.DELIVERY_FAILED, status.name()));
+        assertThat(result.delivery()).isEqualTo(new TaskDeliveryResult(TaskEventType.DELIVERY_NOT_SENT, status.name()));
         assertThat(result.status()).isEqualTo(TaskStatus.PENDING);
         assertThat(tasks.findById(result.taskId()).orElseThrow().getDeliveredAt()).isNull();
         var history = events.findByTaskIdOrderByCreatedAtAsc(result.taskId());
         assertThat(history).extracting(TaskEvent::getEventType)
-                .containsExactly(TaskEventType.CREATED, TaskEventType.DELIVERING, TaskEventType.DELIVERY_FAILED);
+                .containsExactly(TaskEventType.CREATED, TaskEventType.DELIVERY_NOT_SENT);
         assertThat(history.getLast().getContent()).isEqualTo(status.name());
         assertThat(service.create(teamId, userId, request).delivery()).isEqualTo(result.delivery());
         verify(routing, times(1)).sendTask(result.taskId());
@@ -117,10 +117,12 @@ class TaskCreationIntegrationTest extends AbstractIntegrationTest {
     void nonSentRoutingStoresFailure(TaskRoutingResult.Status status) {
         when(routing.sendTask(anyLong())).thenAnswer(invocation ->
                 new TaskRoutingResult(invocation.getArgument(0), status, null, null));
+        var expected = status == TaskRoutingResult.Status.TRANSPORT_ERROR
+                ? TaskEventType.DELIVERY_UNKNOWN : TaskEventType.DELIVERY_NOT_SENT;
         var result = service.create(teamId, userId, request);
-        assertThat(result.delivery()).isEqualTo(new TaskDeliveryResult(TaskEventType.DELIVERY_FAILED, status.name()));
+        assertThat(result.delivery()).isEqualTo(new TaskDeliveryResult(expected, status.name()));
         assertThat(events.findByTaskIdOrderByCreatedAtAsc(result.taskId()))
-                .extracting(TaskEvent::getEventType).containsExactly(TaskEventType.CREATED, TaskEventType.DELIVERING, TaskEventType.DELIVERY_FAILED);
+                .extracting(TaskEvent::getEventType).containsExactly(TaskEventType.CREATED, expected);
     }
 
     @Test
@@ -128,22 +130,85 @@ class TaskCreationIntegrationTest extends AbstractIntegrationTest {
         var created = service.create(teamId, userId, request);
         var replay = service.create(teamId, userId, request);
         assertThat(replay.delivery()).isEqualTo(created.delivery());
-        assertThat(replay.delivery().status()).isEqualTo(TaskEventType.DELIVERED);
+        assertThat(replay.delivery().status()).isEqualTo(TaskEventType.ACK_PENDING);
         verify(routing, times(1)).sendTask(created.taskId());
     }
 
     @Test
     void routingHistoryFailureKeepsCreatedTask() {
         doThrow(new IllegalStateException("routing history failed")).when(events)
-                .save(argThat(event -> event.getEventType() == TaskEventType.DELIVERED));
-        assertThatThrownBy(() -> service.create(teamId, userId, request))
-                .isInstanceOf(IllegalStateException.class);
+                .save(argThat(event -> event.getEventType() == TaskEventType.ACK_PENDING));
+        var response = service.create(teamId, userId, request);
+        assertThat(response.delivery()).isEqualTo(new TaskDeliveryResult(
+                TaskEventType.DELIVERY_UNKNOWN, "HISTORY_RECORD_FAILED"));
         var task = tasks.findByRequesterUserIdAndRequestKey(userId, request.requestKey()).orElseThrow();
         assertThat(task.getDeliveredAt()).isNull();
         assertThat(task.getVersion()).isEqualTo(0L);
         assertThat(events.findByTaskIdOrderByCreatedAtAsc(task.getId()))
-                .extracting(TaskEvent::getEventType).containsExactly(TaskEventType.CREATED, TaskEventType.DELIVERING);
+                .extracting(TaskEvent::getEventType).containsExactly(TaskEventType.CREATED);
     }
+    @Autowired org.springframework.transaction.PlatformTransactionManager transactionManager;
+
+    @ParameterizedTest
+    @EnumSource(value = TaskRoutingResult.Status.class, names = {"SENT", "TRANSPORT_ERROR"})
+    void fastAckIsNotOverwrittenByRoutingResult(TaskRoutingResult.Status status) {
+        when(routing.sendTask(anyLong())).thenAnswer(invocation -> {
+            Long taskId = invocation.getArgument(0);
+            new org.springframework.transaction.support.TransactionTemplate(transactionManager)
+                    .executeWithoutResult(tx -> {
+                        var task = tasks.findByIdForUpdate(taskId).orElseThrow();
+                        task.markDelivered(java.time.LocalDateTime.now());
+                        events.save(TaskEvent.of(taskId, TaskEventType.ACK_RECEIVED, null));
+                    });
+            return new TaskRoutingResult(taskId, status, "event", "connection");
+        });
+        var response = service.create(teamId, userId, request);
+        assertThat(response.delivery().status()).isEqualTo(TaskEventType.ACK_RECEIVED);
+        assertThat(response.status()).isEqualTo(TaskStatus.PENDING);
+        assertThat(events.findByTaskIdOrderByCreatedAtAsc(response.taskId()))
+                .extracting(TaskEvent::getEventType)
+                .containsExactly(TaskEventType.CREATED, TaskEventType.ACK_RECEIVED);
+        assertThat(service.create(teamId, userId, request).delivery()).isEqualTo(response.delivery());
+        verify(routing, times(1)).sendTask(response.taskId());
+    }
+
+    @Test
+    void timeoutBeforeSocketReturnIsNotReplacedByAckPending() {
+        when(routing.sendTask(anyLong())).thenAnswer(invocation -> {
+            Long taskId = invocation.getArgument(0);
+            new org.springframework.transaction.support.TransactionTemplate(transactionManager)
+                    .executeWithoutResult(tx -> {
+                        tasks.findByIdForUpdate(taskId).orElseThrow();
+                        events.save(TaskEvent.of(taskId, TaskEventType.DELIVERY_UNKNOWN, "ACK_TIMEOUT"));
+                    });
+            return new TaskRoutingResult(taskId, TaskRoutingResult.Status.SENT, "event", "connection");
+        });
+        var response = service.create(teamId, userId, request);
+        assertThat(response.delivery()).isEqualTo(
+                new TaskDeliveryResult(TaskEventType.DELIVERY_UNKNOWN, "ACK_TIMEOUT"));
+        assertThat(events.findByTaskIdOrderByCreatedAtAsc(response.taskId())).hasSize(2);
+    }
+
+    @Test
+    void deliveryCommitFailureStillReturnsCreatedTask() {
+        doAnswer(invocation -> {
+            Object saved = invocation.callRealMethod();
+            TransactionSynchronizationManager.registerSynchronization(
+                    new org.springframework.transaction.support.TransactionSynchronization() {
+                        @Override public void beforeCommit(boolean readOnly) {
+                            throw new IllegalStateException("commit failed");
+                        }
+                    });
+            return saved;
+        }).when(events).save(argThat(event -> event.getEventType() == TaskEventType.ACK_PENDING));
+        var response = service.create(teamId, userId, request);
+        assertThat(response.delivery()).isEqualTo(
+                new TaskDeliveryResult(TaskEventType.DELIVERY_UNKNOWN, "HISTORY_RECORD_FAILED"));
+        assertThat(tasks.findById(response.taskId())).isPresent();
+        assertThat(events.findByTaskIdOrderByCreatedAtAsc(response.taskId()))
+                .extracting(TaskEvent::getEventType).containsExactly(TaskEventType.CREATED);
+    }
+
     @Test
     void createdHistoryFailureRollsBackTask() {
         doThrow(new IllegalStateException("history storage failed")).when(events)
@@ -200,7 +265,7 @@ class TaskCreationIntegrationTest extends AbstractIntegrationTest {
             var saved = tasks.findByTeamIdOrderByCreatedAtDesc(teamId);
             assertThat(saved).hasSize(1);
             assertThat(events.findByTaskIdOrderByCreatedAtAsc(saved.getFirst().getId()))
-                    .extracting(TaskEvent::getEventType).containsExactly(TaskEventType.CREATED, TaskEventType.DELIVERING, TaskEventType.DELIVERED);
+                    .extracting(TaskEvent::getEventType).containsExactly(TaskEventType.CREATED, TaskEventType.ACK_PENDING);
         }
     }
 }
