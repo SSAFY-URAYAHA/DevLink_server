@@ -1,7 +1,6 @@
 package com.devlink.server;
 
 import static org.assertj.core.api.Assertions.assertThat;
-
 import java.net.CookieManager;
 import java.net.CookiePolicy;
 import java.net.URI;
