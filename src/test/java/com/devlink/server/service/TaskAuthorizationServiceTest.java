@@ -4,6 +4,7 @@ import java.util.Optional;
 import com.devlink.server.common.BusinessException;
 import com.devlink.server.common.ErrorCode;
 import com.devlink.server.domain.agent.Agent;
+import com.devlink.server.domain.agent.ToolType;
 import com.devlink.server.repository.AgentRepository;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -117,10 +118,7 @@ class TaskAuthorizationServiceTest {
     }
 
     private Agent agent(Long teamId, Long ownerUserId) {
-        Agent agent = mock(Agent.class);
-        when(agent.getTeamId()).thenReturn(teamId);
-        when(agent.getOwnerUserId()).thenReturn(ownerUserId);
-        return agent;
+        return Agent.create(teamId, ownerUserId, "Test agent", null, ToolType.CODEX, "test-project");
     }
 
     private void assertError(Runnable action, ErrorCode expected) {
