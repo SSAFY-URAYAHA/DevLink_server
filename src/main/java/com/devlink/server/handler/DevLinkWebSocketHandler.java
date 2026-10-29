@@ -53,9 +53,15 @@ public class DevLinkWebSocketHandler extends TextWebSocketHandler {
             // 등록 직후 작업 전송이 시작돼도 BROKER_READY가 먼저 나가도록 같은 소켓 잠금을 사용
             synchronized (session) {
                 connectionRegistry.register(agentId, session);
+                // 브로커가 로컬 신원을 구성할 수 있도록 토큰 검증을 마친 사용자·팀 ID를 함께 전달
+                // 클라이언트가 보낸 ID 대신 인증된 AgentPrincipal의 값을 사용
                 var ready = Map.of(
                         "type", "BROKER_READY",
-                        "payload", Map.of("connection_id", session.getId(), "agent_id", agent.agentId()));
+                        "payload", Map.of(
+                                "connection_id", session.getId(),
+                                "agent_id", agent.agentId(),
+                                "user_id", agent.ownerUserId(),
+                                "team_id", agent.teamId()));
                 sender.sendIfCurrent(agentId, session, ready);
             }
         } catch (Exception exception) {

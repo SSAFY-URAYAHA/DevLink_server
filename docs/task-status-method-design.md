@@ -102,7 +102,7 @@ public boolean isTerminal();
 6. `TaskStatusChangedMessage`를 JSON으로 변환하여 `outbox_events`에 **동일 트랜잭션**으로 저장한다. 메시지에는 이벤트 ID, 작업 ID, 갱신된 버전, 이전/새 상태를 담는다.
 7. 커밋 성공 후 API 응답을 반환한다. 별도 발행 작업이 커밋된 Outbox를 읽고 브로커 전송·재시도를 담당한다.
 
-현재 구현은 `TaskStatusService.changeStatus()`의 Outbox 저장까지다. Outbox INSERT 또는 커밋이 실패하면 Task 상태와 `STATUS_CHANGED` 이력도 함께 롤백된다. Outbox 저장에 `REQUIRES_NEW`나 `AFTER_COMMIT` 콜백을 사용하지 않는다. 브로커 전송 실패는 별도 발행기가 처리하며 이미 커밋된 API 결과에 영향을 주지 않는다.
+`TaskStatusService.changeStatus()`는 Outbox 저장까지 담당한다. Outbox INSERT 또는 커밋이 실패하면 Task 상태와 `STATUS_CHANGED` 이력도 함께 롤백된다. Outbox 저장에 `REQUIRES_NEW`나 `AFTER_COMMIT` 콜백을 사용하지 않는다. 커밋된 메시지는 `OutboxPublisher`가 별도로 발행·재시도하며, 브로커 전송 실패는 이미 커밋된 API 결과에 영향을 주지 않는다.
 
 ### 발행 담당자 인계 계약
 
@@ -126,13 +126,17 @@ public boolean isTerminal();
 }
 ```
 
-작업 ID는 프로젝트의 `Long` ID에 맞춰 JSON 숫자로 전송한다. 메시지의 `event_id`는 Outbox 엔티티의 `outboxId`(DB `outbox_id`)와 같은 UUID이고, `version`은 성공 응답 및 저장된 Task 버전과 같다. 발행기는 메시지 점유·점유 만료 복구·전송·재시도·완료 기록을 별도로 구현해야 한다. 실제 수신자 라우팅은 발행 담당자의 구현 범위이며, 메시지에 수신자 ID가 없으므로 필요한 경우 작업 ID로 조회한다. 소비자는 `event_id`로 중복을 제거하고 `version`으로 오래된 알림을 판단한다. `message_key`만으로 발행 순서가 보장되지는 않는다.
+작업 ID는 프로젝트의 `Long` ID에 맞춰 JSON 숫자로 전송한다. 메시지의 `event_id`는 Outbox 엔티티의 `outboxId`(DB `outbox_id`)와 같은 UUID이고, `version`은 성공 응답 및 저장된 Task 버전과 같다. `OutboxPublisher`가 메시지 점유·점유 만료 복구·전송·재시도·완료 기록을 담당한다. `TaskNotificationService`는 작업 ID로 원래 요청자를 조회하고 인증된 현재 연결에 저장된 JSON 전체를 그대로 전송한다. 소비자는 `event_id`로 중복을 제거하고 `version`으로 오래된 알림을 판단한다. `message_key`만으로 발행 순서가 보장되지는 않는다.
+
+현재 `PUBLISHED` 기준은 WebSocket 소켓 쓰기 성공이며 브로커 수신 ACK를 뜻하지 않는다. 새 작업용 ACK 처리와 구분한다. 점유·성공·실패 기록은 짧은 별도 트랜잭션으로 처리하고, 네트워크 전송 중 DB 트랜잭션을 유지하지 않는다. 자신의 유효한 `lock_token`으로만 상태를 갱신한다. 기본 정책은 점유 30초, 최대 5회 시도, 실패 대기 1초부터 지수 증가(상한 60초)이며 `FAILED`는 자동 재처리하지 않는다. 상세한 구현·설정·전달 한계는 [작업 알림 문서](../../bogyeong/docs/task-notification.md)를 참고한다.
 
 동일 상태 요청은 성공으로 처리하지 않고 409로 반환한다. 네트워크 오류 후 클라이언트는 상세 조회로 결과를 확인한다. 추후 정확한 재요청 재생이 필요하면 작업 생성용 `requestKey`와 별개인 상태 변경 요청 키와 payload 검증·결과 저장을 도입한다. 단순히 상태가 같다는 이유로 서로 다른 실패 사유를 무시하면 안 된다.
 
 ## 6. 완료 API와의 공동 구현 경계
 
 5번 담당자의 `TaskCompletionService.complete(...)`는 권한·버전을 확인하고 `Task.complete(...)`를 호출한 후 결과·변경 파일·검증 결과·상태 이력을 **같은 트랜잭션**에 저장한다. 파일 저장 실패 시 상태도 `IN_PROGRESS`로 롤백한다. `TaskFile` 저장과 완료 입력 전체 검증은 완료 서비스가 담당하고, `Task`에는 저장소나 파일 목록 저장 책임을 넣지 않는다.
+
+저장 후 같은 트랜잭션에서 `TaskCompletionOutboxWriter.enqueue(task)`를 호출한다. 이 연결점이 flush로 갱신된 버전을 확보하고 `TASK_COMPLETED` JSON을 Outbox에 저장한다. 완료 API 자체는 별도 담당자가 연결해야 한다. 기존 메모리 이벤트를 함께 발행하지 않는다.
 
 현재 `Task`에는 별도 검증 결과 필드가 없다. 완료 API 구현 시 5번 담당자와 구조화된 검증 결과 저장 모델 및 마이그레이션을 정해야 한다. `resultText`에 임의로 합쳐 저장하는 규약을 여기서 확정하지 않는다. 실패 사유는 현재 모델대로 `resultText`에 저장한다.
 
@@ -173,7 +177,7 @@ public boolean isTerminal();
 - PATCH에서 완료가 불가능하고, 별도 완료 API가 공통 도메인 규칙을 사용하는지 확인한다.
 - 실제 DB의 독립 트랜잭션 둘이 같은 버전을 읽은 뒤 각각 완료/실패를 시도하면 하나만 커밋되고 다른 하나는 409인지 검증한다.
 - 결과·파일·이력 저장 실패 시 작업 상태도 롤백되고 알림이 발생하지 않는지 확인한다.
-- 알림 실패 후에도 성공 응답과 변경 상태가 유지되며, 별도 실패 이력이 저장되는지 확인한다.
+- 알림 실패 후에도 성공 응답과 변경 상태가 유지되며, Outbox의 재시도 상태·오류 기록이 저장되는지 확인한다.
 - REST Agent 인증, 다른 팀 접근, 수신자가 아닌 Agent 접근을 통합 테스트한다.
 
 입력 검증과 그 단위 테스트는 반영됐으며, API·서비스·동시성·알림 검증은 후속 구현의 수락 기준이다.

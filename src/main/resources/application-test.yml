@@ -3,5 +3,8 @@ spring:
     datasource:
         url: ""
 devlink:
+    outbox:
+        # 기존 저장 테스트는 PENDING을 검증하므로 자동 발행 대신 테스트가 명시적으로 실행한다.
+        publisher-enabled: false
     websocket:
         allowed-origins: http://localhost:3000
