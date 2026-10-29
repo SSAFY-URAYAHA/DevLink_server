@@ -11,8 +11,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import com.devlink.server.domain.task.TaskStatus;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
-import org.springframework.data.jpa.repository.Query;
-import org.springframework.data.repository.query.Param;
+
 
 public interface TaskRepository extends JpaRepository<Task, Long> {
     Optional<Task> findByRequesterUserIdAndRequestKey(Long requesterUserId, String requestKey);

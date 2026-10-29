@@ -71,7 +71,13 @@ public class SecurityConfig {
             var delegate = verifiers.getIfAvailable();
             return delegate == null ? Optional.empty() : delegate.verify(token);
         };
-        http.securityMatcher("/api/v1/agent/**")
+        http.securityMatchers(matchers -> matchers
+        		.requestMatchers("/api/v1/agent/**")
+        		.requestMatchers(
+        				HttpMethod.GET,
+        				"/api/v1/teams/*/tasks",
+        				"/api/v1/tasks/*"
+        		))
                 .cors(cors -> cors.configurationSource(apiCorsConfigurationSource(allowedOrigins)))
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .requestCache(AbstractHttpConfigurer::disable)
