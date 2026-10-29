@@ -1,6 +1,8 @@
 server:
     port: 8080
 devlink:
+    cors:
+        allowed-origins: ${CORS_ALLOWED_ORIGINS:https://devlinkfrontend.vercel.app,https://devlink.ai.kr}
     broker:
         heartbeat-timeout-ms: 40000
         heartbeat-check-interval-ms: 1000

@@ -59,9 +59,12 @@ curl -i http://localhost:8080/api/v1/teams    # 401 JSON (리다이렉트 없음
 | DB_URL | jdbc:postgresql://localhost:5432/devlink | JDBC URL (앱 컨테이너는 postgres 호스트) |
 | DB_USERNAME | devlink | PostgreSQL 사용자 |
 | DB_PASSWORD | devlink | PostgreSQL 비밀번호 |
+| CORS_ALLOWED_ORIGINS | https://devlinkfrontend.vercel.app,https://devlink.ai.kr | REST API 허용 Origin (쉼표 구분, 쿠키 포함 요청 허용) |
 | WS_ALLOWED_ORIGINS | http://localhost:3000 | WebSocket 허용 Origin (쉼표 구분) |
 
-prod 프로필은 기본값 없이 작업 디렉터리의 `.env` 또는 환경 변수에서 값을 받습니다: `java -jar build/libs/app.jar --spring.profiles.active=prod`. `.env`는 커밋하지 않습니다. 운영 키 목록은 [deploy/.prod.env.example](deploy/.prod.env.example)에 있으며 실제 값은 GitHub Secret `PROD_ENV`로 관리합니다.
+prod 프로필의 DB·WebSocket 설정은 기본값 없이 작업 디렉터리의 `.env` 또는 환경 변수에서 값을 받습니다: `java -jar build/libs/app.jar --spring.profiles.active=prod`. `.env`는 커밋하지 않습니다. 운영 키 목록은 [deploy/.prod.env.example](deploy/.prod.env.example)에 있으며 실제 값은 GitHub Secret `PROD_ENV`로 관리합니다.
+
+REST CORS는 위의 두 HTTPS Origin을 기본으로 허용합니다. `CORS_ALLOWED_ORIGINS`는 선택 설정이므로 기존 `PROD_ENV`에 키가 없어도 기본값이 적용됩니다. 다른 주소를 추가하려면 허용할 주소 전체를 쉼표로 구분해 지정합니다. 로컬 프론트엔드를 사용할 때도 해당 Origin을 명시적으로 추가합니다. CORS는 `/api/**`에만 적용하며 WebSocket 허용 Origin은 별도 설정입니다.
 
 ## 4. 패키지 구조
 

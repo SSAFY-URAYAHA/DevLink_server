@@ -1,11 +1,13 @@
 package com.devlink.server.config;
 
+import java.util.List;
 import java.util.Optional;
 import com.devlink.server.filter.AgentTokenAuthenticationFilter;
 import com.devlink.server.handler.RestAccessDeniedHandler;
 import com.devlink.server.handler.RestAuthenticationEntryPoint;
 import com.devlink.server.service.AgentTokenVerifier;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.annotation.Order;
@@ -17,6 +19,9 @@ import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.AnonymousAuthenticationFilter;
+import org.springframework.web.cors.CorsConfiguration;
+import org.springframework.web.cors.CorsConfigurationSource;
+import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 
 @Configuration
 public class SecurityConfig {
@@ -49,9 +54,11 @@ public class SecurityConfig {
     @Bean
     @Order(2)
     SecurityFilterChain securityFilterChain(HttpSecurity http,
+            @Value("${devlink.cors.allowed-origins}") List<String> allowedOrigins,
             RestAuthenticationEntryPoint entryPoint, RestAccessDeniedHandler deniedHandler) throws Exception {
         // TODO: 사용자 세션 로그인 구현 시 CSRF·쿠키 속성·세션 고정 보호와 인증 공급자 연결.
-        http.authorizeHttpRequests(authorize -> authorize
+        http.cors(cors -> cors.configurationSource(apiCorsConfigurationSource(allowedOrigins)))
+                .authorizeHttpRequests(authorize -> authorize
                         .requestMatchers("/api/v1/auth/signup", "/api/v1/auth/login",
                                 "/api/v1/health", "/actuator/health").permitAll()
                         .requestMatchers("/api/**").authenticated()
@@ -62,6 +69,21 @@ public class SecurityConfig {
                         .authenticationEntryPoint(entryPoint)
                         .accessDeniedHandler(deniedHandler));
         return http.build();
+    }
+
+    private CorsConfigurationSource apiCorsConfigurationSource(List<String> allowedOrigins) {
+        CorsConfiguration configuration = new CorsConfiguration();
+        configuration.setAllowedOrigins(allowedOrigins);
+        configuration.setAllowedMethods(List.of("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
+        configuration.setAllowedHeaders(List.of(
+                "Accept", "Authorization", "Content-Type", "X-CSRF-TOKEN", "X-XSRF-TOKEN"));
+        configuration.setExposedHeaders(List.of("X-CSRF-TOKEN", "X-XSRF-TOKEN"));
+        configuration.setAllowCredentials(true);
+        configuration.setMaxAge(3600L);
+
+        UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+        source.registerCorsConfiguration("/api/**", configuration);
+        return source;
     }
 
     @Bean
