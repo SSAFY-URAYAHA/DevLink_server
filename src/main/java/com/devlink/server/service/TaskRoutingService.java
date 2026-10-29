@@ -25,7 +25,7 @@ import org.springframework.util.Assert;
 import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.WebSocketSession;
 
-/** 커밋된 작업을 지정 수신자의 현재 연결로 한 번 전송한다. ACK 대기와 자동 재전송은 하지 않는다. */
+/** 커밋된 작업을 한 번 전송한다. ACK는 별도 서비스가 비동기로 확인하며 자동 재전송하지 않는다. */
 @Service
 public class TaskRoutingService {
     private static final Logger log = LoggerFactory.getLogger(TaskRoutingService.class);
@@ -34,14 +34,16 @@ public class TaskRoutingService {
     private final ConnectionRegistry connections;
     private final BrokerMessageSender sender;
     private final AgentPresenceService presence;
+    private final TaskAckService acknowledgements;
 
     public TaskRoutingService(TaskRepository tasks, AgentRepository agents, ConnectionRegistry connections,
-            BrokerMessageSender sender, AgentPresenceService presence) {
+            BrokerMessageSender sender, AgentPresenceService presence, TaskAckService acknowledgements) {
         this.tasks = tasks;
         this.agents = agents;
         this.connections = connections;
         this.sender = sender;
         this.presence = presence;
+        this.acknowledgements = acknowledgements;
     }
 
     // 저장 트랜잭션 안에서 직접 호출하면 거부
@@ -74,11 +76,16 @@ public class TaskRoutingService {
         }
         String eventId = UUID.randomUUID().toString();
         try {
-            boolean sent = sender.sendIfCurrent(agentId, session, TaskCreatedMessage.from(eventId, task));
+            // 같은 소켓의 전송 차례를 기다린 뒤 실제로 쓰기 직전에 ACK 대기를 등록
+            boolean sent = sender.sendIfCurrent(agentId, session, TaskCreatedMessage.from(eventId, task),
+                    () -> acknowledgements.register(taskId, eventId,
+                            new AgentPrincipal(receiver.getId(), receiver.getOwnerUserId(), receiver.getTeamId()),
+                            session));
             // 전송 대기 중 교체된 연결이면 새 연결로 임의 재전송하지 않고 호출자에게 결과를 돌려줌
             return new TaskRoutingResult(taskId, sent ? Status.SENT : Status.CONNECTION_REPLACED,
                     eventId, session.getId());
         } catch (IOException | IllegalStateException exception) {
+            acknowledgements.sendFailed(eventId, session);
             log.warn("Task routing failed for task {} and event {}", taskId, eventId, exception);
             cleanUpFailedConnection(agentId, receiver.getId(), session);
             // TRANSPORT_ERROR를 확정 미수신으로 해석 X

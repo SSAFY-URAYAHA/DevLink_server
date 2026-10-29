@@ -2,10 +2,12 @@ package com.devlink.server.service;
 
 
 import java.util.List;
-import java.time.LocalDateTime;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import com.devlink.server.common.BusinessException;
 import com.devlink.server.common.ErrorCode;
 import com.devlink.server.domain.task.Task;
+import com.devlink.server.dto.TaskRoutingResult;
 import com.devlink.server.dto.TaskRoutingResult.Status;
 import com.devlink.server.domain.taskevent.TaskEvent;
 import com.devlink.server.domain.taskevent.TaskEventType;
@@ -24,6 +26,10 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 @Service
 public class TaskCreationService {
+    private static final Logger log = LoggerFactory.getLogger(TaskCreationService.class);
+    private static final List<TaskEventType> DELIVERY_EVENT_TYPES = List.of(
+            TaskEventType.ACK_PENDING, TaskEventType.ACK_RECEIVED,
+            TaskEventType.DELIVERY_UNKNOWN, TaskEventType.DELIVERY_NOT_SENT);
     private final TaskRepository taskRepository;
     private final TaskEventRepository taskEventRepository;
     private final AgentRepository agentRepository;
@@ -42,9 +48,9 @@ public class TaskCreationService {
     }
 
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
-    public CreateTaskResponse create(Long teamId, Long userId, CreateTaskRequest request) {
+    public CreateTaskResponse create(Long teamId, Long agentId, CreateTaskRequest request) {
         // 트랜잭션 시작 → Task(PENDING) + TaskEvent(CREATED) 저장 → 커밋
-        Creation creation = transaction.execute(tx -> createTask(teamId, userId, request));
+        Creation creation = transaction.execute(tx -> createTask(teamId, agentId, request));
 
         Task task = creation.task();
         if (creation.replayed()) {
@@ -52,66 +58,93 @@ public class TaskCreationService {
             return CreateTaskResponse.of(task, true, delivery);
         }
 
-        // 전송 시작 이력을 커밋한 뒤 네트워크 호출을 수행한다.
-        Long taskId = task.getId();
-        transaction.executeWithoutResult(tx -> taskEventRepository.save(
-                TaskEvent.of(taskId, TaskEventType.DELIVERING, "DELIVERING")));
-
-        // 전송 결과 받기
-        TaskDeliveryResult delivery = deliverTask(task);
-
-        // 결과에 따라 이력 저장
-        task = saveDeliveryEvent(task, delivery);
-
-        // 같은 결과를 응답에 넣기
-        return CreateTaskResponse.of(task, false, delivery);
+        return deliverTask(task);
     }
 
-    private TaskDeliveryResult deliverTask(Task task) {
-        var routing = taskRoutingService.sendTask(task.getId());
-        return new TaskDeliveryResult(routing.status(),
-                routing.status() == Status.SENT ? null : routing.status().name());
+    /** 생성 커밋 이후 전송과 이력 저장의 실패를 구분한다. ACK는 기다리지 않는다. */
+    private CreateTaskResponse deliverTask(Task task) {
+        TaskRoutingResult routing;
+
+        // 1. 브로커 전송
+        try {
+            routing = taskRoutingService.sendTask(task.getId());
+        } catch (RuntimeException exception) {
+            log.error("Task routing failed after creation: taskId={}", task.getId(), exception);
+            return CreateTaskResponse.of(task, false,
+                    new TaskDeliveryResult(TaskEventType.DELIVERY_UNKNOWN, "ROUTING_ERROR"));
+        }
+
+        // 2. 전송 결과 routing을 받아서 Task, TaskEvent upsert
+        try {
+            task = saveDeliveryEvent(task, routing);
+        } catch (RuntimeException exception) {
+            log.error("Failed to record delivery history: taskId={}", task.getId(), exception);
+            return CreateTaskResponse.of(task, false,
+                    new TaskDeliveryResult(TaskEventType.DELIVERY_UNKNOWN, "HISTORY_RECORD_FAILED"));
+        }
+        return CreateTaskResponse.of(task, false, findLatestDelivery(task.getId()));
     }
 
-    private Task saveDeliveryEvent(Task task, TaskDeliveryResult delivery) {
+    /** 전송 결과를 기록한다. deliveredAt은 유효한 ACK를 저장할 때만 변경한다. */
+    private Task saveDeliveryEvent(Task task, TaskRoutingResult routing) {
         return transaction.execute(tx -> {
-            Task savedTask = taskRepository.findById(task.getId())
+            Task savedTask = taskRepository.findByIdForUpdate(task.getId())
                     .orElseThrow(() -> new BusinessException(ErrorCode.RESOURCE_NOT_FOUND));
-            switch (delivery.status()) {
-                case SENT -> {
-                    savedTask.markDelivered(LocalDateTime.now());
-                    taskEventRepository.save(TaskEvent.of(
-                            task.getId(), TaskEventType.DELIVERED, delivery.status().name()));
-                }
-                case RECEIVER_OFFLINE, CONNECTION_UNAVAILABLE, CONNECTION_REPLACED,
-                        TRANSPORT_ERROR, TASK_NOT_PENDING ->
-                    taskEventRepository.save(TaskEvent.of(
-                            task.getId(), TaskEventType.DELIVERY_FAILED, delivery.reasonCode()));
+            if (taskEventRepository.existsByTaskIdAndEventType(
+                    task.getId(), TaskEventType.ACK_RECEIVED)) {
+                return savedTask;
             }
+            TaskEventType eventType = switch (routing.status()) {
+                case SENT
+                    -> TaskEventType.ACK_PENDING;
+
+                case RECEIVER_OFFLINE, CONNECTION_UNAVAILABLE, CONNECTION_REPLACED, TASK_NOT_PENDING
+                    -> TaskEventType.DELIVERY_NOT_SENT;
+
+                case TRANSPORT_ERROR
+                    -> TaskEventType.DELIVERY_UNKNOWN;
+            };
+
+            // ACK뿐 아니라 타임아웃·연결 종료가 먼저 기록된 경우도 보호한다.
+            if (eventType == TaskEventType.ACK_PENDING && taskEventRepository
+                    .findFirstByTaskIdAndEventTypeInOrderByIdDesc(task.getId(), DELIVERY_EVENT_TYPES)
+                    .isPresent()) {
+                return savedTask;
+            }
+            taskEventRepository.save(TaskEvent.of(task.getId(), eventType,
+                    routing.status() == Status.SENT ? null : routing.status().name()));
             return savedTask;
         });
     }
 
     private TaskDeliveryResult findLatestDelivery(Long taskId) {
-        return transaction.execute(tx -> taskEventRepository
-                .findFirstByTaskIdAndEventTypeInOrderByIdDesc(taskId,
-                        List.of(TaskEventType.DELIVERING, TaskEventType.DELIVERED, TaskEventType.DELIVERY_FAILED))
-                .filter(event -> event.getEventType() != TaskEventType.DELIVERING)
-                .map(event -> {
-                    Status status = event.getEventType() == TaskEventType.DELIVERED
-                            ? Status.SENT : Status.valueOf(event.getContent());
-                    return new TaskDeliveryResult(status, status == Status.SENT ? null : status.name());
-                })
-                .orElse(null)); // 아직 라우팅 결과가 없거나 이전 형식의 이력만 존재하는 경우
+        try {
+            return transaction.execute(tx -> taskEventRepository
+                    .findFirstByTaskIdAndEventTypeInOrderByIdDesc(taskId, DELIVERY_EVENT_TYPES)
+                    .map(event -> new TaskDeliveryResult(event.getEventType(),
+                            switch (event.getEventType()) {
+                                case ACK_PENDING, ACK_RECEIVED -> null;
+                                default -> event.getContent();
+                            }))
+                    .orElse(null));
+        } catch (RuntimeException exception) {
+            log.error("Failed to read delivery history: taskId={}", taskId, exception);
+            return new TaskDeliveryResult(TaskEventType.DELIVERY_UNKNOWN, "HISTORY_READ_FAILED");
+        }
     }
-    private Creation createTask(Long teamId, Long userId, CreateTaskRequest request) {
+
+    private Creation createTask(Long teamId, Long agentId, CreateTaskRequest request) {
+        var requester = agentRepository.findById(agentId)
+                .filter(agent -> agent.getTeamId().equals(teamId))
+                .orElseThrow(() -> new BusinessException(ErrorCode.RESOURCE_NOT_FOUND));
+        Long userId = requester.getOwnerUserId();
         // 1. 요청 키로 생성된 작업 찾기
         var existing = taskRepository.findByRequesterUserIdAndRequestKey(userId, request.requestKey());
         // 2. 기존 작업이 있으면 요청 내용 비교
         if (existing.isPresent()) {
             Task task = existing.get();
             if (!task.getTeamId().equals(teamId)
-                    || !task.getRequesterAgentId().equals(request.requesterAgentId())
+                    || !task.getRequesterAgentId().equals(agentId)
                     || !task.getReceiverAgentId().equals(request.receiverAgentId())
                     || !task.getPrompt().equals(request.prompt())) {
                 // 2-1. 기존 작업이 있는데 내용이 다른 경우 요청키를 잘못 재사용한것
@@ -124,7 +157,7 @@ public class TaskCreationService {
         requireReceiver(teamId, request.receiverAgentId());
         // 3-1. Task(새 작업) 저장
         Task task = taskRepository.save(Task.create(request.requestKey(), teamId,
-                request.requesterAgentId(), userId, request.receiverAgentId(), request.prompt()));
+                agentId, userId, request.receiverAgentId(), request.prompt()));
         // 3-2. TaskEvent(생성 이력) 저장
         taskEventRepository.save(TaskEvent.of(task.getId(), TaskEventType.CREATED, null));
         return new Creation(task, false);
