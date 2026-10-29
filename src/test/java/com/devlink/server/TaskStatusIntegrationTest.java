@@ -1,6 +1,9 @@
 package com.devlink.server;
 
 import java.util.UUID;
+import java.util.List;
+import com.devlink.server.domain.outbox.OutboxEvent;
+import com.devlink.server.domain.outbox.OutboxStatus;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
@@ -37,6 +40,7 @@ class TaskStatusIntegrationTest extends AbstractIntegrationTest {
     @Autowired TaskStatusService service;
     @MockitoSpyBean TaskRepository tasks;
     @MockitoSpyBean TaskEventRepository events;
+    @MockitoSpyBean OutboxEventRepository outbox;
     @Autowired UserRepository users;
     @Autowired TeamRepository teams;
     @Autowired AgentRepository agents;
@@ -97,6 +101,23 @@ class TaskStatusIntegrationTest extends AbstractIntegrationTest {
         assertThat(last.getEventType()).isEqualTo(TaskEventType.STATUS_CHANGED);
         assertThat(last.getContent()).startsWith(
                 (target == TaskStatus.FAILED ? "IN_PROGRESS" : "PENDING") + " → " + target + ": ");
+        assertThat(taskOutbox()).hasSize(target == TaskStatus.FAILED ? 2 : 1);
+        var publishedCandidate = taskOutbox().stream()
+                .filter(event -> event.getMessage().path("version").asLong() == response.version())
+                .findFirst().orElseThrow();
+        assertThat(publishedCandidate.getEventType()).isEqualTo("TASK_STATUS_CHANGED");
+        assertThat(publishedCandidate.getDestination()).isEqualTo("task-events");
+        assertThat(publishedCandidate.getMessageKey()).isEqualTo("TASK:" + taskId);
+        assertThat(publishedCandidate.getStatus()).isEqualTo(OutboxStatus.PENDING);
+        assertThat(publishedCandidate.getAttemptCount()).isZero();
+        var message = publishedCandidate.getMessage();
+        assertThat(message.size()).isEqualTo(5);
+        assertThat(message.path("event_id").asText()).isEqualTo(publishedCandidate.getOutboxId().toString());
+        assertThat(message.path("type").asText()).isEqualTo("TASK_STATUS_CHANGED");
+        assertThat(message.path("task_id").asLong()).isEqualTo(taskId);
+        assertThat(message.path("payload").path("previous_status").asText())
+                .isEqualTo(target == TaskStatus.FAILED ? "IN_PROGRESS" : "PENDING");
+        assertThat(message.path("payload").path("status").asText()).isEqualTo(target.name());
     }
 
     @ParameterizedTest
@@ -122,6 +143,7 @@ class TaskStatusIntegrationTest extends AbstractIntegrationTest {
                 .isInstanceOfSatisfying(BusinessException.class,
                         ex -> assertThat(ex.getErrorCode()).isEqualTo(ErrorCode.TASK_VERSION_CONFLICT));
         assertThat(events.findByTaskIdOrderByCreatedAtAsc(taskId)).hasSize(1);
+        assertThat(taskOutbox()).hasSize(1);
     }
 
     @ParameterizedTest
@@ -141,6 +163,7 @@ class TaskStatusIntegrationTest extends AbstractIntegrationTest {
                 .isInstanceOfSatisfying(BusinessException.class,
                         ex -> assertThat(ex.getErrorCode()).isEqualTo(ErrorCode.TASK_STATE_CONFLICT));
         assertThat(events.findByTaskIdOrderByCreatedAtAsc(taskId)).isEmpty();
+        assertThat(taskOutbox()).isEmpty();
     }
 
     @Test
@@ -155,6 +178,24 @@ class TaskStatusIntegrationTest extends AbstractIntegrationTest {
         doThrow(new IllegalStateException("history failed")).when(events).save(any(TaskEvent.class));
         assertThatThrownBy(() -> service.changeStatus(taskId, agentId, request(TaskStatus.IN_PROGRESS, 0L)))
                 .isInstanceOf(IllegalStateException.class);
+        assertUnchanged();
+    }
+
+    @Test
+    void outboxInsertFailureRollsBackFlushedTaskAndHistory() {
+        doAnswer(call -> {
+            OutboxEvent candidate = call.getArgument(0);
+            // Exercise a real database constraint failure, after task/history have been flushed.
+            entityManager.createNativeQuery("""
+                    INSERT INTO outbox_events
+                        (outbox_id, event_type, aggregate_type, aggregate_id, destination, message)
+                    VALUES (:id, 'TASK_STATUS_CHANGED', 'TASK', :taskId, NULL, '{}'::jsonb)
+                    """).setParameter("id", candidate.getOutboxId())
+                    .setParameter("taskId", taskId.toString()).executeUpdate();
+            return candidate;
+        }).when(outbox).save(any(OutboxEvent.class));
+        assertThatThrownBy(() -> service.changeStatus(taskId, agentId, request(TaskStatus.IN_PROGRESS, 0L)))
+                .isInstanceOf(RuntimeException.class);
         assertUnchanged();
     }
 
@@ -205,6 +246,18 @@ class TaskStatusIntegrationTest extends AbstractIntegrationTest {
         assertThat(saved.getVersion()).isEqualTo(1L);
         assertThat(events.findByTaskIdOrderByCreatedAtAsc(taskId)).singleElement()
                 .satisfies(event -> assertThat(event.getContent()).contains(" → " + saved.getStatus() + ": "));
+        assertThat(taskOutbox()).singleElement().satisfies(event -> {
+            assertThat(event.getMessage().path("version").asLong()).isEqualTo(saved.getVersion());
+            assertThat(event.getMessage().path("payload").path("status").asText())
+                    .isEqualTo(saved.getStatus().name());
+        });
+    }
+
+    private List<OutboxEvent> taskOutbox() {
+        return outbox.findAll().stream()
+                .filter(event -> event.getAggregateType().equals("TASK")
+                        && event.getAggregateId().equals(taskId.toString()))
+                .toList();
     }
 
     private void assertUnchanged() {
@@ -215,5 +268,6 @@ class TaskStatusIntegrationTest extends AbstractIntegrationTest {
         assertThat(task.getCompletedAt()).isNull();
         assertThat(task.getResultText()).isNull();
         assertThat(events.findByTaskIdOrderByCreatedAtAsc(taskId)).isEmpty();
+        assertThat(taskOutbox()).isEmpty();
     }
 }

@@ -1,5 +1,10 @@
 package com.devlink.server.service;
 
+import java.util.UUID;
+import com.devlink.server.domain.outbox.OutboxEvent;
+import com.devlink.server.dto.TaskStatusChangedMessage;
+import com.devlink.server.repository.OutboxEventRepository;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.devlink.server.common.BusinessException;
 import com.devlink.server.common.ErrorCode;
 import com.devlink.server.domain.task.Task;
@@ -19,6 +24,8 @@ import org.springframework.transaction.annotation.Transactional;
 public class TaskStatusService {
     private final TaskRepository taskRepository;
     private final TaskEventRepository taskEventRepository;
+    private final OutboxEventRepository outboxEventRepository;
+    private final ObjectMapper objectMapper;
 
     @Transactional
     public ChangeTaskStatusResponse changeStatus(Long taskId, Long agentId, ChangeTaskStatusRequest request) {
@@ -65,6 +72,12 @@ public class TaskStatusService {
                 previous + " → " + task.getStatus() + ": " + description));
         // 이력과 상태를 함께 flush한다. 동시 변경은 @Version으로 검출하고 전체 롤백한다.
         taskRepository.flush();
+        UUID outboxId = UUID.randomUUID();
+        var message = TaskStatusChangedMessage.from(outboxId, task, previous);
+        // 별도 트랜잭션이나 커밋 후 콜백을 사용하지 않는다. 저장 실패 시 상태와 이력도 롤백된다.
+        outboxEventRepository.save(OutboxEvent.create(outboxId, TaskStatusChangedMessage.TYPE,
+                "TASK", taskId.toString(), TaskStatusChangedMessage.DESTINATION, "TASK:" + taskId,
+                objectMapper.valueToTree(message)));
         return ChangeTaskStatusResponse.from(task);
     }
 }
