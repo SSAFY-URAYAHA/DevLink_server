@@ -43,9 +43,10 @@ public class TaskRequestAuthorizationAdvice extends RequestBodyAdviceAdapter {
         HttpServletRequest request = attributes.getRequest();
         Long userId = requireUserId(request);
         Long teamId = requireTeamId(request);
+        Long requesterAgentId = requireRequesterAgentId(request);
         // 기존 작업 Controller를 수정하지 않고 웹 요청 경계에서 권한 확인
         // 권한 조회와 기존 작업 저장은 별도 트랜잭션으로 처리
-        authorization.requireRequester(userId, teamId, taskRequest.requesterAgentId(), taskRequest.receiverAgentId());
+        authorization.requireRequester(userId, teamId, requesterAgentId, taskRequest.receiverAgentId());
         return body;
     }
 
@@ -70,6 +71,22 @@ public class TaskRequestAuthorizationAdvice extends RequestBodyAdviceAdapter {
         }
         try {
             long value = Long.parseLong(teamId);
+            if (value <= 0) {
+                throw new BusinessException(ErrorCode.VALIDATION_FAILED);
+            }
+            return value;
+        } catch (NumberFormatException exception) {
+            throw new BusinessException(ErrorCode.VALIDATION_FAILED);
+        }
+    }
+
+    private Long requireRequesterAgentId(HttpServletRequest request) {
+        String agentId = request.getParameter("agentId");
+        if (agentId == null) {
+            throw new BusinessException(ErrorCode.VALIDATION_FAILED);
+        }
+        try {
+            long value = Long.parseLong(agentId);
             if (value <= 0) {
                 throw new BusinessException(ErrorCode.VALIDATION_FAILED);
             }

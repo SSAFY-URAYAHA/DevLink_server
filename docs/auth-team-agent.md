@@ -26,7 +26,7 @@
 
 세션은 서버 메모리에 저장하며 30분 동안 요청이 없으면 만료됩니다. 세션 쿠키는 HttpOnly이며 로컬에서는 SameSite=Lax, 운영에서는 HTTPS용 Secure와 SameSite=None을 사용합니다. 운영 브라우저가 서드파티 쿠키를 차단하면 별도 사이트 간 로그인 유지가 제한될 수 있습니다. 브라우저 로그아웃은 사용자 세션만 종료하며 Agent 토큰·브로커 연결을 폐기하지 않습니다.
 
-로그인 시 내부 `UserPrincipal(userId)`를 저장하고 기존 작업 API와의 호환을 위해 같은 세션에 `userId`도 기록합니다. 기존 `POST /api/v1/tasks/{teamId}`의 권한 검사는 신규 `TaskRequestAuthorizationAdvice`에서 요청 본문을 읽은 뒤 수행합니다. 팀 가입·요청 Agent 소유권·송수신 Agent의 팀 일치를 확인하며, 기존 작업 생성 Controller와 Service는 변경하지 않습니다. 권한 조회와 작업 저장은 별도 트랜잭션입니다. OAuth 외부 계정 연결과 다중 서버용 세션 저장소는 후속 범위입니다.
+로그인 시 내부 `UserPrincipal(userId)`를 저장하고 권한 검사에 사용할 `userId`를 같은 세션에 기록합니다. 기존 작업 생성 API는 `POST /api/v1/tasks/{teamId}?agentId={요청 Agent ID}`이며 `Authorization` 헤더가 필요합니다. 본문은 `requestKey`, `receiverAgentId`, `prompt`만 받습니다. `TaskRequestAuthorizationAdvice`는 로그인 사용자의 팀 가입·쿼리로 지정한 요청 Agent의 소유권·송수신 Agent의 팀 일치를 확인합니다. 이 경로는 사용자 세션 인증을 유지하며, Agent 토큰만 사용하는 요청은 `/api/v1/agent/tasks`를 이용합니다. 팀원의 작업 생성 Controller와 Service는 변경하지 않습니다. 권한 조회와 작업 저장은 별도 트랜잭션입니다. OAuth 외부 계정 연결과 다중 서버용 세션 저장소는 후속 범위입니다.
 
 ## 6-1. 팀 관리 및 공통 팀 권한
 

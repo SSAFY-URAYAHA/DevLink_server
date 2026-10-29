@@ -34,9 +34,8 @@ public class AgentTaskController {
         }
         authorization.requireRequester(principal.ownerUserId(), principal.teamId(), principal.agentId(),
                 request.receiverAgentId());
-        CreateTaskResponse result = tasks.create(principal.teamId(), principal.ownerUserId(),
-                new CreateTaskRequest(request.requestKey(), principal.agentId(),
-                        request.receiverAgentId(), request.prompt()));
+        CreateTaskResponse result = tasks.create(principal.teamId(), principal.agentId(),
+                new CreateTaskRequest(request.requestKey(), request.receiverAgentId(), request.prompt()));
         return ResponseEntity.status(result.replayed() ? 200 : 201).body(ApiResponse.success(result));
     }
 }
