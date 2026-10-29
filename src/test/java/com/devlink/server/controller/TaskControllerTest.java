@@ -38,7 +38,8 @@ class TaskControllerTest {
     @BeforeEach
     void setup() {
         service = mock(TaskCreationService.class);
-        mvc = MockMvcBuilders.standaloneSetup(new TaskController(service))
+        mvc = MockMvcBuilders.standaloneSetup(new TaskController(service,
+                        mock(com.devlink.server.service.TaskStatusService.class)))
                 .setControllerAdvice(new GlobalExceptionHandler()).build();
     }
 

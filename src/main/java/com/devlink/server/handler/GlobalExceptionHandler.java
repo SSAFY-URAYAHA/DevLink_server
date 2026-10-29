@@ -12,6 +12,7 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.hibernate.exception.ConstraintViolationException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.method.annotation.HandlerMethodValidationException;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
@@ -65,7 +66,8 @@ public class GlobalExceptionHandler {
         return response(ErrorCode.VALIDATION_FAILED);
     }
 
-    @ExceptionHandler({HttpMessageNotReadableException.class, MethodArgumentTypeMismatchException.class})
+    @ExceptionHandler({HttpMessageNotReadableException.class, MethodArgumentTypeMismatchException.class,
+            MissingServletRequestParameterException.class})
     public ResponseEntity<ApiResponse<Void>> handleMalformedInput(Exception exception) {
         return response(ErrorCode.VALIDATION_FAILED);
     }
