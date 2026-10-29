@@ -12,6 +12,14 @@ import org.springframework.data.repository.query.Param;
 public interface AgentRepository extends JpaRepository<Agent, Long> {
     List<Agent> findByTeamId(Long teamId);
 
+    List<Agent> findAllByTeamIdOrderByIdAsc(Long teamId);
+
+    Optional<Agent> findByConnectionTokenHash(String connectionTokenHash);
+
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select agent from Agent agent where agent.id = :agentId")
+    Optional<Agent> findByIdForUpdate(@Param("agentId") Long agentId);
+
     // 접속 보고와 연결 종료의 상태 갱신을 Agent별로 직렬화한다.
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select agent from Agent agent where agent.id = :agentId")
