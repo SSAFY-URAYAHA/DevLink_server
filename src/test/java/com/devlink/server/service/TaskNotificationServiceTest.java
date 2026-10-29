@@ -3,34 +3,31 @@ package com.devlink.server.service;
 import java.io.IOException;
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
+import com.devlink.server.config.OutboxPublisherSettings;
 import com.devlink.server.domain.AgentPrincipal;
 import com.devlink.server.domain.agent.Agent;
 import com.devlink.server.domain.agent.ToolType;
 import com.devlink.server.domain.task.Task;
-import com.devlink.server.domain.task.TaskStatus;
+import com.devlink.server.dto.OutboxDelivery;
 import com.devlink.server.dto.TaskNotificationResult.Status;
 import com.devlink.server.realtime.BrokerMessageSender;
 import com.devlink.server.realtime.ConnectionRegistry;
-import com.devlink.server.realtime.TaskNotificationEvent;
 import com.devlink.server.repository.AgentRepository;
 import com.devlink.server.repository.TaskRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.SerializationFeature;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
-import org.junit.jupiter.params.provider.EnumSource;
-import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
-import org.springframework.security.core.Authentication;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
@@ -44,20 +41,17 @@ class TaskNotificationServiceTest {
     private final TaskRepository tasks = mock(TaskRepository.class);
     private final AgentRepository agents = mock(AgentRepository.class);
     private final ConnectionRegistry connections = new ConnectionRegistry();
-    // 실제 서버처럼 LocalDateTime을 ISO 문자열로 직렬화해 알림 본문을 검증한다.
-    private final ObjectMapper mapper = new ObjectMapper().findAndRegisterModules()
-            .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+    private final ObjectMapper mapper = new ObjectMapper();
     private final BrokerMessageSender sender = new BrokerMessageSender(connections, mapper);
     private final AgentPresenceService presence = mock(AgentPresenceService.class);
-    private final TaskNotificationFailureRecorder failures = mock(TaskNotificationFailureRecorder.class);
     private final TaskNotificationService notifications = new TaskNotificationService(
-            tasks, agents, connections, sender, presence, failures);
-    private final Task task = Task.create("private-request-key", 31L, 1L, 20L, 2L, "private-prompt");
+            tasks, agents, connections, sender, presence);
+    private final Task task = Task.create("private-key", 31L, 1L, 20L, 2L, "private-prompt");
     private final Agent requester = Agent.create(31L, 20L, "Requester", null, ToolType.CODEX, "server");
 
     TaskNotificationServiceTest() {
         ReflectionTestUtils.setField(task, "id", 7L);
-        ReflectionTestUtils.setField(task, "version", 1L);
+        ReflectionTestUtils.setField(task, "version", 2L);
         task.accept(2L);
         ReflectionTestUtils.setField(requester, "id", 1L);
         when(tasks.findById(7L)).thenReturn(Optional.of(task));
@@ -65,253 +59,133 @@ class TaskNotificationServiceTest {
     }
 
     @ParameterizedTest
-    @EnumSource(value = TaskStatus.class, names = {"IN_PROGRESS", "FAILED", "COMPLETED"})
-    void sendsCorrectStatusAndResultSnapshotToRequester(TaskStatus state) throws Exception {
-        if (state == TaskStatus.FAILED) {
-            task.fail(2L, "테스트 실패", true);
-        } else if (state == TaskStatus.COMPLETED) {
-            task.complete(2L, "작업 완료");
-        }
-        var event = event();
-        WebSocketSession session = registerRequester();
+    @CsvSource({"PENDING,IN_PROGRESS", "PENDING,REJECTED", "IN_PROGRESS,FAILED"})
+    void sendsStoredEnvelopeWithSameIdVersionAndPayload(String previous, String status) throws Exception {
+        var delivery = delivery(previous, status);
+        WebSocketSession session = register();
+        AtomicBoolean renewed = new AtomicBoolean();
+        doAnswer(call -> {
+            assertThat(renewed).isTrue();
+            return null;
+        }).when(session).sendMessage(any());
 
-        assertThat(notifications.sendNotification(event).status()).isEqualTo(Status.SENT);
+        assertThat(notifications.sendNotification(delivery, () -> renewed.set(true)).status()).isEqualTo(Status.SENT);
 
         var message = ArgumentCaptor.forClass(TextMessage.class);
         verify(session).sendMessage(message.capture());
-        var json = mapper.readTree(message.getValue().getPayload());
-        assertThat(json.path("type").asText()).isEqualTo(
-                state == TaskStatus.COMPLETED ? "TASK_COMPLETED" : "TASK_STATUS_CHANGED");
-        assertThat(json.path("event_id").asText()).isEqualTo(event.eventId());
-        assertThat(json.path("payload").path("task_id").asLong()).isEqualTo(7);
-        assertThat(json.path("payload").path("requester_agent_id").asLong()).isEqualTo(1);
-        assertThat(json.path("payload").path("status").asText()).isEqualTo(state.name());
-        assertThat(json.path("payload").path("version").asLong()).isEqualTo(1);
-        if (state != TaskStatus.IN_PROGRESS) {
-            assertThat(json.path("payload").path("result_text").asText()).isEqualTo(task.getResultText());
-            assertThat(json.path("payload").path("partially_modified").asBoolean()).isEqualTo(task.isPartiallyModified());
-        }
-        assertThat(message.getValue().getPayload()).doesNotContain("private-prompt", "private-request-key",
-                "requester_user_id", "token");
-        assertThat(task.getStatus()).isEqualTo(state);
-        assertThat(task.getVersion()).isEqualTo(1L);
+        assertThat(mapper.readTree(message.getValue().getPayload())).isEqualTo(delivery.message());
+        assertThat(message.getValue().getPayload()).doesNotContain("private-key", "private-prompt", "requester_user_id");
+        assertThat(task.getVersion()).isEqualTo(2L);
         verify(tasks, never()).save(any());
-        verifyNoInteractions(presence, failures);
+        verifyNoInteractions(presence);
     }
 
     @Test
-    void snapshotIsNotReplacedWithLaterDatabaseStatus() throws Exception {
-        var accepted = event();
-        task.complete(2L, "나중에 완료된 결과");
-        ReflectionTestUtils.setField(task, "version", 2L);
-        WebSocketSession session = registerRequester();
+    void laterTaskCompletionCannotRewriteStoredEarlierMessage() throws Exception {
+        var delivery = delivery("PENDING", "IN_PROGRESS");
+        task.complete(2L, "later result");
+        WebSocketSession session = register();
 
-        notifications.sendNotification(accepted);
+        notifications.sendNotification(delivery, () -> { });
 
         var message = ArgumentCaptor.forClass(TextMessage.class);
         verify(session).sendMessage(message.capture());
-        var payload = mapper.readTree(message.getValue().getPayload()).path("payload");
-        assertThat(payload.path("status").asText()).isEqualTo("IN_PROGRESS");
-        assertThat(payload.path("version").asLong()).isEqualTo(1);
-        assertThat(payload.path("result_text").isNull()).isTrue();
+        assertThat(mapper.readTree(message.getValue().getPayload()).path("payload").path("status").asText())
+                .isEqualTo("IN_PROGRESS");
+        assertThat(mapper.readTree(message.getValue().getPayload()).path("version").asLong()).isEqualTo(1);
     }
 
     @Test
-    void rejectedTaskNotifiesRequesterWithReasonAndNoStartTime() throws Exception {
-        Task rejected = rejectedTask();
-        when(tasks.findById(7L)).thenReturn(Optional.of(rejected));
-        WebSocketSession session = registerRequester();
-        var event = TaskNotificationEvent.statusChanged(rejected);
-
-        assertThat(notifications.sendNotification(event).status()).isEqualTo(Status.SENT);
-
-        var message = ArgumentCaptor.forClass(TextMessage.class);
-        verify(session).sendMessage(message.capture());
-        var json = mapper.readTree(message.getValue().getPayload());
-        assertThat(json.path("type").asText()).isEqualTo("TASK_STATUS_CHANGED");
-        var payload = json.path("payload");
-        assertThat(payload.path("status").asText()).isEqualTo("REJECTED");
-        assertThat(payload.path("result_text").asText()).isEqualTo("담당 범위가 아니라 거절합니다");
-        assertThat(payload.path("started_at").isNull()).isTrue();
-        assertThat(payload.path("completed_at").isTextual()).isTrue();
-        assertThat(payload.path("partially_modified").asBoolean()).isFalse();
-        assertThat(rejected.getStatus()).isEqualTo(TaskStatus.REJECTED);
-        assertThat(rejected.getVersion()).isEqualTo(1L);
-        verifyNoInteractions(presence, failures);
-    }
-
-    @ParameterizedTest
-    @ValueSource(strings = {"resultText", "completedAt"})
-    void rejectedNotificationStillRequiresReasonAndCompletionTime(String requiredField) {
-        Task rejected = rejectedTask();
-        ReflectionTestUtils.setField(rejected, requiredField, null);
-
-        assertThatIllegalArgumentException().isThrownBy(() -> TaskNotificationEvent.statusChanged(rejected));
-    }
-
-    @Test
-    void inProgressNotificationStillRequiresStartTime() {
-        ReflectionTestUtils.setField(task, "startedAt", null);
-
-        assertThatIllegalArgumentException().isThrownBy(() -> TaskNotificationEvent.statusChanged(task));
-    }
-
-    @Test
-    void connectedBrokerReceivesNotificationEvenWhenMcpAgentIsOffline() {
-        registerRequester();
-        requester.markOffline();
-
-        assertThat(notifications.sendNotification(event()).status()).isEqualTo(Status.SENT);
-    }
-
-    @Test
-    void noConnectionRecordsFailureWithoutChangingTask() {
-        var event = event();
-
-        assertThat(notifications.sendNotification(event).status()).isEqualTo(Status.CONNECTION_UNAVAILABLE);
-
-        verify(failures).record(event, Status.CONNECTION_UNAVAILABLE);
-        assertThat(task.getStatus()).isEqualTo(TaskStatus.IN_PROGRESS);
-        assertThat(task.getVersion()).isEqualTo(1L);
-    }
-
-    @Test
-    void missingRequesterDoesNotSendToAnotherAgent() {
-        when(agents.findById(1L)).thenReturn(Optional.empty());
-
-        assertThat(notifications.sendNotification(event()).status()).isEqualTo(Status.REQUESTER_UNAVAILABLE);
-    }
-
-    @ParameterizedTest
-    @CsvSource({"99,20", "31,99"})
-    void requesterMustStillBelongToTaskTeamAndOwner(long teamId, long ownerId) throws Exception {
-        WebSocketSession session = registerRequester();
-        ReflectionTestUtils.setField(requester, "teamId", teamId);
-        ReflectionTestUtils.setField(requester, "ownerUserId", ownerId);
-
-        assertThat(notifications.sendNotification(event()).status()).isEqualTo(Status.REQUESTER_UNAVAILABLE);
-
-        verify(session, never()).sendMessage(any());
+    void disconnectedRequesterReturnsRetryableOutcome() {
+        assertThat(notifications.sendNotification(delivery("PENDING", "IN_PROGRESS"), () -> { }).status())
+                .isEqualTo(Status.CONNECTION_UNAVAILABLE);
     }
 
     @ParameterizedTest
     @CsvSource({"99,20,31", "1,99,31", "1,20,99"})
     void sessionIdentityMustMatchRequester(long agentId, long ownerId, long teamId) throws Exception {
-        WebSocketSession session = registerRequester();
+        WebSocketSession session = register();
         when(session.getPrincipal()).thenReturn(UsernamePasswordAuthenticationToken.authenticated(
                 new AgentPrincipal(agentId, ownerId, teamId), null, List.of()));
 
-        assertThat(notifications.sendNotification(event()).status()).isEqualTo(Status.REQUESTER_UNAVAILABLE);
+        assertThat(notifications.sendNotification(delivery("PENDING", "IN_PROGRESS"), () -> { }).status())
+                .isEqualTo(Status.REQUESTER_UNAVAILABLE);
 
         verify(session, never()).sendMessage(any());
     }
 
     @Test
-    void invalidatedAuthenticationCannotReceiveNotification() throws Exception {
-        WebSocketSession session = registerRequester();
-        ((Authentication) session.getPrincipal()).setAuthenticated(false);
+    void changedAgentOwnershipCannotReceiveHistoricalTaskMessage() throws Exception {
+        WebSocketSession session = register();
+        ReflectionTestUtils.setField(requester, "ownerUserId", 99L);
 
-        assertThat(notifications.sendNotification(event()).status()).isEqualTo(Status.REQUESTER_UNAVAILABLE);
+        assertThat(notifications.sendNotification(delivery("PENDING", "IN_PROGRESS"), () -> { }).status())
+                .isEqualTo(Status.REQUESTER_UNAVAILABLE);
 
         verify(session, never()).sendMessage(any());
     }
 
     @Test
-    void futureOrMismatchedEventCannotSendPrivateResult() throws Exception {
-        var event = event();
+    void wrongAggregateOrFutureVersionIsNotSent() throws Exception {
+        WebSocketSession session = register();
+        var valid = delivery("PENDING", "IN_PROGRESS");
+        var invalid = new OutboxDelivery(valid.outboxId(), valid.lockToken(), valid.eventType(), "TASK", "8",
+                valid.destination(), "TASK:8", valid.message(), 1);
+        assertThat(notifications.sendNotification(invalid, () -> { }).status()).isEqualTo(Status.INVALID_EVENT);
         ReflectionTestUtils.setField(task, "version", 0L);
-        WebSocketSession session = registerRequester();
-
-        assertThat(notifications.sendNotification(event).status()).isEqualTo(Status.INVALID_EVENT);
-
+        assertThat(notifications.sendNotification(valid, () -> { }).status()).isEqualTo(Status.INVALID_EVENT);
         verify(session, never()).sendMessage(any());
-        verify(failures).record(event, Status.INVALID_EVENT);
     }
 
     @Test
-    void failureToRecordNotificationErrorDoesNotEscape() {
-        var event = event();
-        doThrow(new IllegalStateException("History unavailable")).when(failures)
-                .record(event, Status.CONNECTION_UNAVAILABLE);
-
-        assertThat(notifications.sendNotification(event).status()).isEqualTo(Status.CONNECTION_UNAVAILABLE);
-        assertThat(task.getStatus()).isEqualTo(TaskStatus.IN_PROGRESS);
-    }
-
-    @Test
-    void transportFailureCleansOnlyFailedConnectionAndPreservesCompletedResult() throws Exception {
-        task.complete(2L, "완료 결과 보존");
-        WebSocketSession session = registerRequester();
-        doThrow(new IOException("Socket failed")).when(session).sendMessage(any());
-
-        assertThat(notifications.sendNotification(event()).status()).isEqualTo(Status.TRANSPORT_ERROR);
-
-        assertThat(connections.findByAgentId("1")).isEmpty();
-        verify(session).close(CloseStatus.SERVER_ERROR);
-        verify(presence).markOfflineIfDisconnected(1L);
-        assertThat(task.getStatus()).isEqualTo(TaskStatus.COMPLETED);
-        assertThat(task.getResultText()).isEqualTo("완료 결과 보존");
-    }
-
-    @Test
-    void oldSendFailureCannotRemoveReplacementConnection() throws Exception {
-        WebSocketSession previous = registerRequester();
+    void sendFailurePreservesTaskAndDoesNotCloseNewReplacement() throws Exception {
+        WebSocketSession previous = register();
         WebSocketSession current = session("new");
-        doAnswer(invocation -> {
+        doAnswer(call -> {
             connections.register("1", current);
-            throw new IOException("Previous socket failed after reconnect");
+            throw new IOException("old connection failed");
         }).when(previous).sendMessage(any());
 
-        assertThat(notifications.sendNotification(event()).status()).isEqualTo(Status.TRANSPORT_ERROR);
+        assertThat(notifications.sendNotification(delivery("PENDING", "IN_PROGRESS"), () -> { }).status())
+                .isEqualTo(Status.TRANSPORT_ERROR);
 
         assertThat(connections.findByAgentId("1")).contains(current);
+        verify(current, never()).close(any(CloseStatus.class));
         verifyNoInteractions(presence);
-        verify(current, never()).sendMessage(any());
     }
 
     @Test
-    void queuedNotificationDoesNotAutomaticallyRetryOnReplacement() throws Exception {
-        WebSocketSession previous = registerRequester();
-        WebSocketSession current = session("new");
-        BrokerMessageSender replacing = new BrokerMessageSender(connections, mapper) {
-            @Override
-            public boolean sendIfCurrent(String agentId, WebSocketSession session, Object message) throws IOException {
-                connections.register(agentId, current);
-                return super.sendIfCurrent(agentId, session, message);
-            }
-        };
-        var service = new TaskNotificationService(tasks, agents, connections, replacing, presence, failures);
+    void failedWriteReleasesCurrentConnection() throws Exception {
+        WebSocketSession session = register();
+        doThrow(new IOException("write failed")).when(session).sendMessage(any());
 
-        assertThat(service.sendNotification(event()).status()).isEqualTo(Status.CONNECTION_CHANGED);
+        assertThat(notifications.sendNotification(delivery("PENDING", "IN_PROGRESS"), () -> { }).status())
+                .isEqualTo(Status.TRANSPORT_ERROR);
 
-        verify(previous, never()).sendMessage(any());
-        verify(current, never()).sendMessage(any());
+        assertThat(connections.findByAgentId("1")).isEmpty();
+        verify(presence).markOfflineIfDisconnected(1L);
     }
 
     @Test
-    void notificationFactoriesRejectWrongStateOrUnsavedTask() {
-        assertThatIllegalArgumentException().isThrownBy(() -> TaskNotificationEvent.completed(task));
-        task.complete(2L, "완료");
-        assertThatIllegalArgumentException().isThrownBy(() -> TaskNotificationEvent.statusChanged(task));
-        Task unsaved = Task.create("key", 31L, 1L, 20L, 2L, "prompt");
-        assertThatIllegalArgumentException().isThrownBy(() -> TaskNotificationEvent.statusChanged(unsaved));
+    void exponentialRetryIsCappedWithoutOverflow() {
+        var settings = new OutboxPublisherSettings(false, 1, 1000, 1, 10, 10);
+        assertThat(settings.retryDelayMillis(1)).isEqualTo(1);
+        assertThat(settings.retryDelayMillis(2)).isEqualTo(2);
+        assertThat(settings.retryDelayMillis(3)).isEqualTo(4);
+        assertThat(settings.retryDelayMillis(5)).isEqualTo(10);
+        assertThat(settings.retryDelayMillis(100)).isEqualTo(10);
     }
 
-    private TaskNotificationEvent event() {
-        return task.getStatus() == TaskStatus.COMPLETED
-                ? TaskNotificationEvent.completed(task) : TaskNotificationEvent.statusChanged(task);
+    private OutboxDelivery delivery(String previous, String status) {
+        UUID id = UUID.randomUUID();
+        var message = mapper.createObjectNode().put("type", "TASK_STATUS_CHANGED")
+                .put("event_id", id.toString()).put("task_id", 7).put("version", 1);
+        message.putObject("payload").put("previous_status", previous).put("status", status);
+        return new OutboxDelivery(id, UUID.randomUUID(), "TASK_STATUS_CHANGED", "TASK", "7",
+                "task-events", "TASK:7", message, 1);
     }
 
-    private Task rejectedTask() {
-        // 수락을 거치지 않고 PENDING에서 거절된 실제 도메인 흐름을 사용한다.
-        Task rejected = Task.create("rejected-key", 31L, 1L, 20L, 2L, "prompt");
-        ReflectionTestUtils.setField(rejected, "id", 7L);
-        ReflectionTestUtils.setField(rejected, "version", 1L);
-        rejected.reject(2L, "담당 범위가 아니라 거절합니다");
-        return rejected;
-    }
-
-    private WebSocketSession registerRequester() {
+    private WebSocketSession register() {
         WebSocketSession session = session("requester");
         connections.register("1", session);
         return session;

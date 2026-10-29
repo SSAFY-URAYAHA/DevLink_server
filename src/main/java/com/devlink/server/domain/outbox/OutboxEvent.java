@@ -98,6 +98,55 @@ public class OutboxEvent {
         return message.deepCopy();
     }
 
+    /** 행 잠금을 획득한 발행기가 점유한다. 메시지와 식별자는 재시도 중에도 바꾸지 않는다. */
+    public void claim(UUID token, Instant now, Instant leaseEnd) {
+        boolean ready = status == OutboxStatus.PENDING && !availableAt.isAfter(now);
+        boolean abandoned = status == OutboxStatus.PROCESSING && lockedUntil != null && !lockedUntil.isAfter(now);
+        if ((!ready && !abandoned) || token == null || !leaseEnd.isAfter(now)) {
+            throw new IllegalStateException("Outbox event is not claimable");
+        }
+        status = OutboxStatus.PROCESSING;
+        lockToken = token;
+        lockedUntil = leaseEnd;
+        attemptCount++;
+    }
+
+    public boolean ownsLease(UUID token, Instant now) {
+        return status == OutboxStatus.PROCESSING && Objects.equals(lockToken, token)
+                && lockedUntil != null && lockedUntil.isAfter(now);
+    }
+
+    /** 소켓 쓰기 차례를 기다린 뒤 실제 전송 직전에 점유를 연장한다. */
+    public void renewLease(Instant leaseEnd) {
+        lockedUntil = leaseEnd;
+    }
+
+    /** PUBLISHED는 소켓 쓰기 성공이며 브로커 수신 ACK나 작업 완료를 뜻하지 않는다. */
+    public void published(Instant now) {
+        status = OutboxStatus.PUBLISHED;
+        publishedAt = now;
+        lastError = null;
+        clearLease();
+    }
+
+    public void retryAt(Instant nextAttempt, String error) {
+        status = OutboxStatus.PENDING;
+        availableAt = nextAttempt;
+        lastError = error;
+        clearLease();
+    }
+
+    public void publicationFailed(String error) {
+        status = OutboxStatus.FAILED;
+        lastError = error;
+        clearLease();
+    }
+
+    private void clearLease() {
+        lockToken = null;
+        lockedUntil = null;
+    }
+
     @PrePersist
     private void initializeTimestamps() {
         this.createdAt = Instant.now();

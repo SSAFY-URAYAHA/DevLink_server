@@ -1,19 +1,27 @@
 package com.devlink.server.dto;
 
 import java.time.LocalDateTime;
+import java.util.UUID;
+import com.devlink.server.domain.task.Task;
 import com.devlink.server.domain.task.TaskStatus;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import org.springframework.util.Assert;
 
-/** 요청자에게 전달할 상태·결과 스냅샷이다. 프롬프트·토큰·요청 키는 포함하지 않는다. */
-public record TaskNotificationMessage(String type, @JsonProperty("event_id") String eventId, Payload payload) {
-    public record Payload(
-            @JsonProperty("task_id") long taskId,
-            @JsonProperty("team_id") long teamId,
-            @JsonProperty("requester_agent_id") long requesterAgentId,
-            @JsonProperty("receiver_agent_id") long receiverAgentId,
-            TaskStatus status,
-            long version,
-            @JsonProperty("result_text") String resultText,
+public record TaskNotificationMessage(String type, @JsonProperty("event_id") UUID eventId,
+        @JsonProperty("task_id") long taskId, long version, Payload payload) {
+    public static TaskNotificationMessage completed(UUID eventId, Task task) {
+        Assert.isTrue(task.getStatus() == TaskStatus.COMPLETED, "task must be completed");
+        Assert.notNull(task.getId(), "task must be persisted");
+        Assert.notNull(task.getVersion(), "task must be flushed");
+        Assert.hasText(task.getResultText(), "completed result must not be blank");
+        Assert.notNull(task.getStartedAt(), "startedAt must not be null");
+        Assert.notNull(task.getCompletedAt(), "completedAt must not be null");
+        return new TaskNotificationMessage("TASK_COMPLETED", eventId, task.getId(), task.getVersion(),
+                new Payload(task.getStatus(), task.getResultText(), task.isPartiallyModified(),
+                        task.getStartedAt(), task.getCompletedAt()));
+    }
+
+    public record Payload(TaskStatus status, @JsonProperty("result_text") String resultText,
             @JsonProperty("partially_modified") boolean partiallyModified,
             @JsonProperty("started_at") LocalDateTime startedAt,
             @JsonProperty("completed_at") LocalDateTime completedAt) { }
