@@ -3,11 +3,13 @@ package com.devlink.server.handler;
 import com.devlink.server.common.ApiResponse;
 import com.devlink.server.common.BusinessException;
 import com.devlink.server.common.ErrorCode;
+import com.devlink.server.domain.task.Task;
 import com.devlink.server.exception.InvalidTaskInputException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.hibernate.exception.ConstraintViolationException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.http.converter.HttpMessageNotReadableException;
@@ -43,6 +45,16 @@ public class GlobalExceptionHandler {
                     && "uk_tasks_request_key".equals(violation.getConstraintName())) {
                 return response(ErrorCode.REQUEST_KEY_CONFLICT);
             }
+        }
+        return handleUnexpected(exception);
+    }
+
+    @ExceptionHandler(ObjectOptimisticLockingFailureException.class)
+    public ResponseEntity<ApiResponse<Void>> handleOptimisticLock(
+            ObjectOptimisticLockingFailureException exception) {
+        // 엔티티를 식별할 수 있는 Task 충돌에만 작업 전용 오류 코드를 사용한다.
+        if (Task.class.getName().equals(exception.getPersistentClassName())) {
+            return response(ErrorCode.TASK_VERSION_CONFLICT);
         }
         return handleUnexpected(exception);
     }
