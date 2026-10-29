@@ -99,7 +99,7 @@ class TaskNotificationIntegrationTest extends AbstractIntegrationTest {
     }
 
     @ParameterizedTest
-    @EnumSource(value = TaskStatus.class, names = {"IN_PROGRESS", "FAILED", "COMPLETED"})
+    @EnumSource(value = TaskStatus.class, names = {"IN_PROGRESS", "FAILED", "COMPLETED", "REJECTED"})
     void committedStatusAndResultAreSentOnlyToRequesterWithoutTaskAck(TaskStatus status) throws Exception {
         try (var client = HttpClient.newHttpClient();
                 var requesterBroker = connect(client, "requester", requester);
@@ -118,7 +118,16 @@ class TaskNotificationIntegrationTest extends AbstractIntegrationTest {
             assertThat(message.path("payload").path("version").asLong()).isEqualTo(snapshot.payload().version());
             if (status != TaskStatus.IN_PROGRESS) {
                 assertThat(message.path("payload").path("result_text").asText()).isEqualTo("보존할 처리 결과");
+            }
+            if (status == TaskStatus.COMPLETED || status == TaskStatus.FAILED) {
                 assertThat(files.findByTaskId(taskId)).hasSize(1);
+            }
+            if (status == TaskStatus.REJECTED) {
+                // 시작 전 거절은 시작 시각·변경 파일 없이 거절 사유와 종료 시각만 알린다.
+                assertThat(message.path("payload").path("started_at").isNull()).isTrue();
+                assertThat(message.path("payload").path("completed_at").isTextual()).isTrue();
+                assertThat(message.path("payload").path("partially_modified").asBoolean()).isFalse();
+                assertThat(files.findByTaskId(taskId)).isEmpty();
             }
             assertThat(receiverBroker.listener.messages.poll(150, TimeUnit.MILLISECONDS)).isNull();
             assertThat(tasks.findById(taskId).orElseThrow().getVersion()).isEqualTo(snapshot.payload().version());
@@ -129,7 +138,7 @@ class TaskNotificationIntegrationTest extends AbstractIntegrationTest {
     }
 
     @ParameterizedTest
-    @EnumSource(value = TaskStatus.class, names = {"IN_PROGRESS", "FAILED", "COMPLETED"})
+    @EnumSource(value = TaskStatus.class, names = {"IN_PROGRESS", "FAILED", "COMPLETED", "REJECTED"})
     void rollbackDoesNotSendNotificationOrKeepStatusResultFilesOrHistory(TaskStatus status) throws Exception {
         try (var client = HttpClient.newHttpClient(); var broker = connect(client, "requester", requester)) {
             updateTask(status, true, true, broker);
@@ -208,13 +217,17 @@ class TaskNotificationIntegrationTest extends AbstractIntegrationTest {
         var transaction = new TransactionTemplate(transactionManager);
         return transaction.execute(tx -> {
             Task task = tasks.findById(taskId).orElseThrow();
-            task.accept(receiver.getId());
-            if (status == TaskStatus.COMPLETED) {
-                task.complete(receiver.getId(), "보존할 처리 결과");
-            } else if (status == TaskStatus.FAILED) {
-                task.fail(receiver.getId(), "보존할 처리 결과", true);
+            if (status == TaskStatus.REJECTED) {
+                task.reject(receiver.getId(), "보존할 처리 결과");
+            } else {
+                task.accept(receiver.getId());
+                if (status == TaskStatus.COMPLETED) {
+                    task.complete(receiver.getId(), "보존할 처리 결과");
+                } else if (status == TaskStatus.FAILED) {
+                    task.fail(receiver.getId(), "보존할 처리 결과", true);
+                }
             }
-            if (status != TaskStatus.IN_PROGRESS) {
+            if (status == TaskStatus.COMPLETED || status == TaskStatus.FAILED) {
                 files.save(TaskFile.of(taskId, "src/Example.java", ChangeType.MODIFIED, "saved diff"));
             }
             history.save(TaskEvent.of(taskId, TaskEventType.STATUS_CHANGED, status.name()));

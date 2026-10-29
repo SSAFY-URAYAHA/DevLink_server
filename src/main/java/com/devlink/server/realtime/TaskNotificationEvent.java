@@ -23,10 +23,15 @@ public record TaskNotificationEvent(String eventId, Type type, long requesterUse
                 "notification identities must be positive");
         Assert.isTrue(payload.version() >= 0, "version must not be negative");
         boolean allowed = type == Type.TASK_COMPLETED ? payload.status() == TaskStatus.COMPLETED
-                : payload.status() == TaskStatus.IN_PROGRESS || payload.status() == TaskStatus.FAILED;
+                : payload.status() == TaskStatus.IN_PROGRESS || payload.status() == TaskStatus.FAILED
+                        || payload.status() == TaskStatus.REJECTED;
         Assert.isTrue(allowed, "notification type does not match task status");
-        Assert.notNull(payload.startedAt(), "startedAt must not be null");
+        // 거절은 작업 시작 전이므로 시작 시각 없이 알린다. 수락·실패·완료는 기존 검증을 유지한다.
+        if (payload.status() != TaskStatus.REJECTED) {
+            Assert.notNull(payload.startedAt(), "startedAt must not be null");
+        }
         if (payload.status() != TaskStatus.IN_PROGRESS) {
+            // 거절도 종료 상태이므로 거절 사유와 종료 시각은 반드시 있어야 한다.
             Assert.hasText(payload.resultText(), "terminal task result must not be blank");
             Assert.notNull(payload.completedAt(), "completedAt must not be null");
         }

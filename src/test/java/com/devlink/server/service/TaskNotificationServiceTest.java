@@ -15,10 +15,12 @@ import com.devlink.server.realtime.TaskNotificationEvent;
 import com.devlink.server.repository.AgentRepository;
 import com.devlink.server.repository.TaskRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.Authentication;
@@ -42,7 +44,9 @@ class TaskNotificationServiceTest {
     private final TaskRepository tasks = mock(TaskRepository.class);
     private final AgentRepository agents = mock(AgentRepository.class);
     private final ConnectionRegistry connections = new ConnectionRegistry();
-    private final ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+    // 실제 서버처럼 LocalDateTime을 ISO 문자열로 직렬화해 알림 본문을 검증한다.
+    private final ObjectMapper mapper = new ObjectMapper().findAndRegisterModules()
+            .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
     private final BrokerMessageSender sender = new BrokerMessageSender(connections, mapper);
     private final AgentPresenceService presence = mock(AgentPresenceService.class);
     private final TaskNotificationFailureRecorder failures = mock(TaskNotificationFailureRecorder.class);
@@ -110,6 +114,46 @@ class TaskNotificationServiceTest {
         assertThat(payload.path("status").asText()).isEqualTo("IN_PROGRESS");
         assertThat(payload.path("version").asLong()).isEqualTo(1);
         assertThat(payload.path("result_text").isNull()).isTrue();
+    }
+
+    @Test
+    void rejectedTaskNotifiesRequesterWithReasonAndNoStartTime() throws Exception {
+        Task rejected = rejectedTask();
+        when(tasks.findById(7L)).thenReturn(Optional.of(rejected));
+        WebSocketSession session = registerRequester();
+        var event = TaskNotificationEvent.statusChanged(rejected);
+
+        assertThat(notifications.sendNotification(event).status()).isEqualTo(Status.SENT);
+
+        var message = ArgumentCaptor.forClass(TextMessage.class);
+        verify(session).sendMessage(message.capture());
+        var json = mapper.readTree(message.getValue().getPayload());
+        assertThat(json.path("type").asText()).isEqualTo("TASK_STATUS_CHANGED");
+        var payload = json.path("payload");
+        assertThat(payload.path("status").asText()).isEqualTo("REJECTED");
+        assertThat(payload.path("result_text").asText()).isEqualTo("담당 범위가 아니라 거절합니다");
+        assertThat(payload.path("started_at").isNull()).isTrue();
+        assertThat(payload.path("completed_at").isTextual()).isTrue();
+        assertThat(payload.path("partially_modified").asBoolean()).isFalse();
+        assertThat(rejected.getStatus()).isEqualTo(TaskStatus.REJECTED);
+        assertThat(rejected.getVersion()).isEqualTo(1L);
+        verifyNoInteractions(presence, failures);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"resultText", "completedAt"})
+    void rejectedNotificationStillRequiresReasonAndCompletionTime(String requiredField) {
+        Task rejected = rejectedTask();
+        ReflectionTestUtils.setField(rejected, requiredField, null);
+
+        assertThatIllegalArgumentException().isThrownBy(() -> TaskNotificationEvent.statusChanged(rejected));
+    }
+
+    @Test
+    void inProgressNotificationStillRequiresStartTime() {
+        ReflectionTestUtils.setField(task, "startedAt", null);
+
+        assertThatIllegalArgumentException().isThrownBy(() -> TaskNotificationEvent.statusChanged(task));
     }
 
     @Test
@@ -256,6 +300,15 @@ class TaskNotificationServiceTest {
     private TaskNotificationEvent event() {
         return task.getStatus() == TaskStatus.COMPLETED
                 ? TaskNotificationEvent.completed(task) : TaskNotificationEvent.statusChanged(task);
+    }
+
+    private Task rejectedTask() {
+        // 수락을 거치지 않고 PENDING에서 거절된 실제 도메인 흐름을 사용한다.
+        Task rejected = Task.create("rejected-key", 31L, 1L, 20L, 2L, "prompt");
+        ReflectionTestUtils.setField(rejected, "id", 7L);
+        ReflectionTestUtils.setField(rejected, "version", 1L);
+        rejected.reject(2L, "담당 범위가 아니라 거절합니다");
+        return rejected;
     }
 
     private WebSocketSession registerRequester() {
