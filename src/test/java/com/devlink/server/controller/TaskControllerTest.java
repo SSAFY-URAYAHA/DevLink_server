@@ -28,24 +28,25 @@ import static org.mockito.ArgumentMatchers.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
-/** MVC tests; session login and security-filter integration are separate responsibilities. */
+/** MVC tests; Agent token verification and security-filter integration are separate responsibilities. */
 class TaskControllerTest {
     private TaskCreationService service;
     private MockMvc mvc;
     private final ObjectMapper json = new ObjectMapper();
-    private final CreateTaskRequest valid = new CreateTaskRequest("key", 2L, 4L, "Implement feature");
+    private final CreateTaskRequest valid = new CreateTaskRequest("key", 4L, "Implement feature");
 
     @BeforeEach
     void setup() {
         service = mock(TaskCreationService.class);
-        mvc = MockMvcBuilders.standaloneSetup(new TaskController(service))
+        mvc = MockMvcBuilders.standaloneSetup(new TaskController(service,
+                        mock(com.devlink.server.service.TaskStatusService.class)))
                 .setControllerAdvice(new GlobalExceptionHandler()).build();
     }
 
     @Test
-    void createsUsingSessionUserAndReturns201() throws Exception {
+    void createsUsingAgentParameterWithoutSessionAndReturns201() throws Exception {
         when(service.create(anyLong(), anyLong(), any())).thenReturn(response(false));
-        mvc.perform(post("/api/v1/tasks/1").sessionAttr("userId", 3L)
+        mvc.perform(post("/api/v1/tasks/1").header("Authorization", "Bearer agent-token").param("agentId", "2")
                         .contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(valid)))
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.success").value(true))
@@ -54,7 +55,7 @@ class TaskControllerTest {
                 .andExpect(jsonPath("$.data.version").value(0))
                 .andExpect(jsonPath("$.data.delivery.status").value("DELIVERY_NOT_SENT"))
                 .andExpect(jsonPath("$.data.delivery.reasonCode").value("RECEIVER_OFFLINE"));
-        verify(service).create(1L, 3L, valid);
+        verify(service).create(1L, 2L, valid);
     }
 
     @Test
@@ -62,7 +63,7 @@ class TaskControllerTest {
         when(service.create(anyLong(), anyLong(), any())).thenReturn(
                 new CreateTaskResponse(101L, 4L, TaskStatus.PENDING, 1L, false,
                         new TaskDeliveryResult(TaskEventType.ACK_PENDING, null)));
-        mvc.perform(post("/api/v1/tasks/1").sessionAttr("userId", 3L)
+        mvc.perform(post("/api/v1/tasks/1").header("Authorization", "Bearer agent-token").param("agentId", "2")
                         .contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(valid)))
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.data.delivery.status").value("ACK_PENDING"))
@@ -72,27 +73,27 @@ class TaskControllerTest {
     @Test
     void replayReturns200() throws Exception {
         when(service.create(anyLong(), anyLong(), any())).thenReturn(response(true));
-        mvc.perform(post("/api/v1/tasks/1").sessionAttr("userId", 3L)
+        mvc.perform(post("/api/v1/tasks/1").header("Authorization", "Bearer agent-token").param("agentId", "2")
                         .contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(valid)))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.data.replayed").value(true));
     }
 
     static Stream<CreateTaskRequest> invalidRequests() {
         return Stream.of(
-                new CreateTaskRequest(null, 2L, 4L, "x"),
-                new CreateTaskRequest(" ", 2L, 4L, "x"),
-                new CreateTaskRequest("x".repeat(65), 2L, 4L, "x"),
-                new CreateTaskRequest("key", null, 4L, "x"),
-                new CreateTaskRequest("key", 0L, 4L, "x"),
-                new CreateTaskRequest("key", 2L, -1L, "x"),
-                new CreateTaskRequest("key", 2L, 4L, null),
-                new CreateTaskRequest("key", 2L, 4L, " "));
+                new CreateTaskRequest(null, 4L, "x"),
+                new CreateTaskRequest(" ", 4L, "x"),
+                new CreateTaskRequest("x".repeat(65), 4L, "x"),
+                new CreateTaskRequest("key", null, "x"),
+                new CreateTaskRequest("key", 0L, "x"),
+                new CreateTaskRequest("key", -1L, "x"),
+                new CreateTaskRequest("key", 4L, null),
+                new CreateTaskRequest("key", 4L, " "));
     }
 
     @ParameterizedTest
     @MethodSource("invalidRequests")
     void invalidBodyDoesNotReachService(CreateTaskRequest request) throws Exception {
-        mvc.perform(post("/api/v1/tasks/1").sessionAttr("userId", 3L)
+        mvc.perform(post("/api/v1/tasks/1").header("Authorization", "Bearer agent-token").param("agentId", "2")
                         .contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(request)))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.code").value("VALIDATION_FAILED"));
@@ -102,7 +103,7 @@ class TaskControllerTest {
     @ParameterizedTest
     @ValueSource(strings = {"{", "null", ""})
     void malformedBodyReturns400(String body) throws Exception {
-        mvc.perform(post("/api/v1/tasks/1").sessionAttr("userId", 3L)
+        mvc.perform(post("/api/v1/tasks/1").header("Authorization", "Bearer agent-token").param("agentId", "2")
                         .contentType(MediaType.APPLICATION_JSON).content(body))
                 .andExpect(status().isBadRequest());
         verifyNoInteractions(service);
@@ -111,17 +112,35 @@ class TaskControllerTest {
     @ParameterizedTest
     @ValueSource(strings = {"0", "-1", "invalid"})
     void invalidTeamDoesNotReachService(String team) throws Exception {
-        mvc.perform(post("/api/v1/tasks/" + team).sessionAttr("userId", 3L)
+        mvc.perform(post("/api/v1/tasks/" + team).header("Authorization", "Bearer agent-token").param("agentId", "2")
                         .contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(valid)))
                 .andExpect(status().isBadRequest());
         verifyNoInteractions(service);
     }
 
     @Test
-    void missingSessionIdentityDoesNotReachService() throws Exception {
-        mvc.perform(post("/api/v1/tasks/1").contentType(MediaType.APPLICATION_JSON)
+    void missingAuthorizationHeaderDoesNotReachService() throws Exception {
+        mvc.perform(post("/api/v1/tasks/1").param("agentId", "2").contentType(MediaType.APPLICATION_JSON)
                         .content(json.writeValueAsString(valid)))
-                .andExpect(status().isUnauthorized());
+                .andExpect(status().isBadRequest());
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void missingAgentParameterDoesNotReachService() throws Exception {
+        mvc.perform(post("/api/v1/tasks/1").header("Authorization", "Bearer agent-token")
+                        .contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(valid)))
+                .andExpect(status().isBadRequest());
+        verifyNoInteractions(service);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"0", "-1", "invalid"})
+    void invalidAgentParameterDoesNotReachService(String agentId) throws Exception {
+        mvc.perform(post("/api/v1/tasks/1").header("Authorization", "Bearer agent-token")
+                        .param("agentId", agentId)
+                        .contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(valid)))
+                .andExpect(status().isBadRequest());
         verifyNoInteractions(service);
     }
 
@@ -129,7 +148,7 @@ class TaskControllerTest {
     void serviceConflictUsesCommonErrorResponse() throws Exception {
         when(service.create(anyLong(), anyLong(), any()))
                 .thenThrow(new BusinessException(ErrorCode.REQUEST_KEY_CONFLICT));
-        mvc.perform(post("/api/v1/tasks/1").sessionAttr("userId", 3L)
+        mvc.perform(post("/api/v1/tasks/1").header("Authorization", "Bearer agent-token").param("agentId", "2")
                         .contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(valid)))
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.code").value("REQUEST_KEY_CONFLICT"));
@@ -146,7 +165,7 @@ class TaskControllerTest {
                 "uk_tasks_request_key");
         when(service.create(anyLong(), anyLong(), any()))
                 .thenThrow(new DataIntegrityViolationException("duplicate", violation));
-        mvc.perform(post("/api/v1/tasks/1").sessionAttr("userId", 3L)
+        mvc.perform(post("/api/v1/tasks/1").header("Authorization", "Bearer agent-token").param("agentId", "2")
                         .contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(valid)))
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.code").value("REQUEST_KEY_CONFLICT"));
@@ -156,7 +175,7 @@ class TaskControllerTest {
     void unrelatedDatabaseViolationIsNotReportedAsDuplicate() throws Exception {
         when(service.create(anyLong(), anyLong(), any()))
                 .thenThrow(new DataIntegrityViolationException("storage error"));
-        mvc.perform(post("/api/v1/tasks/1").sessionAttr("userId", 3L)
+        mvc.perform(post("/api/v1/tasks/1").header("Authorization", "Bearer agent-token").param("agentId", "2")
                         .contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(valid)))
                 .andExpect(status().isInternalServerError());
     }
