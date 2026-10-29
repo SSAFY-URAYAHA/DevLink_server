@@ -34,8 +34,11 @@ class DevLinkServerIntegrationTest extends AbstractIntegrationTest {
     @Test
     void migratedSchemaPassesValidationAndHealthAndSecurityWork() {
         assertThat(entityManagerFactory.getMetamodel().getEntities()).hasSize(7);
-        assertThat(flyway.info().all()).hasSize(1);
-        assertThat(flyway.info().current().getVersion().getVersion()).isEqualTo("1");
+        assertThat(flyway.info().applied())
+                .extracting(migration -> migration.getVersion().getVersion())
+                .containsExactly("1", "2");
+        assertThat(flyway.info().pending()).isEmpty();
+        assertThat(flyway.info().current().getVersion().getVersion()).isEqualTo("2");
         assertThat(flyway.validateWithResult().validationSuccessful).isTrue();
         List<String> tables = jdbc.queryForList(
                 "SELECT tablename FROM pg_tables WHERE schemaname = 'public'", String.class);
