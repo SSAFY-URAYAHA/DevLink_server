@@ -99,12 +99,34 @@ public boolean isTerminal();
 3. `Clock`에서 시각을 생성하고 `task.accept(...)` 또는 `task.fail(...)`을 호출한다.
 4. `TaskEventType.STATUS_CHANGED` 이력을 같은 트랜잭션에 저장한다. 이전/변경 상태, 행위자, 발생 시각을 기록한다. 원문 토큰은 저장하지 않는다.
 5. `flush()`로 기존 `@Version` 충돌을 확인하고 증가한 버전을 응답 및 알림 스냅샷에 담는다. `expectedVersion` 사전 비교만으로 동시 요청을 막을 수 없으므로 JPA 버전 검사를 함께 사용한다.
-6. 불변 `TaskStatusChangedEvent`를 발행한다. 스냅샷에는 작업·요청자 Agent·팀 ID, 이전/새 상태, 결과, 부분 수정 여부, 버전, 발생 시각을 담고 JPA 엔티티를 전달하지 않는다.
-7. 커밋 성공 후 `AFTER_COMMIT` 리스너에서 6번 담당자의 알림 인터페이스를 호출한다. 롤백된 요청은 알리지 않는다.
+6. `TaskStatusChangedMessage`를 JSON으로 변환하여 `outbox_events`에 **동일 트랜잭션**으로 저장한다. 메시지에는 이벤트 ID, 작업 ID, 갱신된 버전, 이전/새 상태를 담는다.
+7. 커밋 성공 후 API 응답을 반환한다. 별도 발행 작업이 커밋된 Outbox를 읽고 브로커 전송·재시도를 담당한다.
 
-알림 실패는 리스너에서 처리하여 이미 커밋된 작업을 롤백하거나 상태 변경 API를 실패로 응답하지 않게 한다. 실패 이력 `NOTIFY_FAILED`는 별도 Spring Bean의 `REQUIRES_NEW` 트랜잭션으로 저장한다. 실패 이력 저장 오류도 로깅하고 전파하지 않는다. 커밋 후 리스너에서 원래 트랜잭션에 단순 저장하면 정상 커밋을 보장할 수 없다.
+현재 구현은 `TaskStatusService.changeStatus()`의 Outbox 저장까지다. Outbox INSERT 또는 커밋이 실패하면 Task 상태와 `STATUS_CHANGED` 이력도 함께 롤백된다. Outbox 저장에 `REQUIRES_NEW`나 `AFTER_COMMIT` 콜백을 사용하지 않는다. 브로커 전송 실패는 별도 발행기가 처리하며 이미 커밋된 API 결과에 영향을 주지 않는다.
 
-MVP에서는 커밋 직후 프로세스가 종료되면 알림을 놓칠 수 있으며 상세 조회로 상태를 확인한다. 향후 알림 전달 보장이 필요하면 상태 저장과 동일 트랜잭션에 outbox를 기록하고 별도 전달자가 전송한다. 현재 `TaskEvent`에는 전달 상태·재시도 정보가 없으므로 그대로 outbox라고 간주하지 않는다. 이벤트의 버전은 브로커가 오래된 알림을 식별하는 기준으로 사용한다.
+### 발행 담당자 인계 계약
+
+- `event_type`: `TASK_STATUS_CHANGED`
+- `aggregate_type`: `TASK`, `aggregate_id`: 작업 ID의 문자열 표현
+- `destination`: `task-events` (논리적 대상이며 실제 브로커 토픽/전송 경로 매핑은 발행기에서 구현)
+- `message_key`: `TASK:{taskId}`
+- 최초 상태: `PENDING`, `attempt_count = 0`, `available_at`은 저장 시각
+- `message`는 아래 형식의 완성된 JSON이다. 재시도 시 `event_id`와 메시지를 새로 생성하지 않는다.
+
+```json
+{
+  "type": "TASK_STATUS_CHANGED",
+  "event_id": "550e8400-e29b-41d4-a716-446655440000",
+  "task_id": 1,
+  "version": 1,
+  "payload": {
+    "previous_status": "PENDING",
+    "status": "IN_PROGRESS"
+  }
+}
+```
+
+작업 ID는 프로젝트의 `Long` ID에 맞춰 JSON 숫자로 전송한다. 메시지의 `event_id`는 Outbox 엔티티의 `outboxId`(DB `outbox_id`)와 같은 UUID이고, `version`은 성공 응답 및 저장된 Task 버전과 같다. 발행기는 메시지 점유·점유 만료 복구·전송·재시도·완료 기록을 별도로 구현해야 한다. 실제 수신자 라우팅은 발행 담당자의 구현 범위이며, 메시지에 수신자 ID가 없으므로 필요한 경우 작업 ID로 조회한다. 소비자는 `event_id`로 중복을 제거하고 `version`으로 오래된 알림을 판단한다. `message_key`만으로 발행 순서가 보장되지는 않는다.
 
 동일 상태 요청은 성공으로 처리하지 않고 409로 반환한다. 네트워크 오류 후 클라이언트는 상세 조회로 결과를 확인한다. 추후 정확한 재요청 재생이 필요하면 작업 생성용 `requestKey`와 별개인 상태 변경 요청 키와 payload 검증·결과 저장을 도입한다. 단순히 상태가 같다는 이유로 서로 다른 실패 사유를 무시하면 안 된다.
 
