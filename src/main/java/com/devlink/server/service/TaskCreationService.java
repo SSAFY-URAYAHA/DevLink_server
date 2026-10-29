@@ -48,9 +48,9 @@ public class TaskCreationService {
     }
 
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
-    public CreateTaskResponse create(Long teamId, Long userId, CreateTaskRequest request) {
+    public CreateTaskResponse create(Long teamId, Long agentId, CreateTaskRequest request) {
         // 트랜잭션 시작 → Task(PENDING) + TaskEvent(CREATED) 저장 → 커밋
-        Creation creation = transaction.execute(tx -> createTask(teamId, userId, request));
+        Creation creation = transaction.execute(tx -> createTask(teamId, agentId, request));
 
         Task task = creation.task();
         if (creation.replayed()) {
@@ -133,14 +133,18 @@ public class TaskCreationService {
         }
     }
 
-    private Creation createTask(Long teamId, Long userId, CreateTaskRequest request) {
+    private Creation createTask(Long teamId, Long agentId, CreateTaskRequest request) {
+        var requester = agentRepository.findById(agentId)
+                .filter(agent -> agent.getTeamId().equals(teamId))
+                .orElseThrow(() -> new BusinessException(ErrorCode.RESOURCE_NOT_FOUND));
+        Long userId = requester.getOwnerUserId();
         // 1. 요청 키로 생성된 작업 찾기
         var existing = taskRepository.findByRequesterUserIdAndRequestKey(userId, request.requestKey());
         // 2. 기존 작업이 있으면 요청 내용 비교
         if (existing.isPresent()) {
             Task task = existing.get();
             if (!task.getTeamId().equals(teamId)
-                    || !task.getRequesterAgentId().equals(request.requesterAgentId())
+                    || !task.getRequesterAgentId().equals(agentId)
                     || !task.getReceiverAgentId().equals(request.receiverAgentId())
                     || !task.getPrompt().equals(request.prompt())) {
                 // 2-1. 기존 작업이 있는데 내용이 다른 경우 요청키를 잘못 재사용한것
@@ -153,7 +157,7 @@ public class TaskCreationService {
         requireReceiver(teamId, request.receiverAgentId());
         // 3-1. Task(새 작업) 저장
         Task task = taskRepository.save(Task.create(request.requestKey(), teamId,
-                request.requesterAgentId(), userId, request.receiverAgentId(), request.prompt()));
+                agentId, userId, request.receiverAgentId(), request.prompt()));
         // 3-2. TaskEvent(생성 이력) 저장
         taskEventRepository.save(TaskEvent.of(task.getId(), TaskEventType.CREATED, null));
         return new Creation(task, false);
