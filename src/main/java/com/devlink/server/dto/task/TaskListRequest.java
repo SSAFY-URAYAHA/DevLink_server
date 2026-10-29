@@ -4,7 +4,6 @@ import com.devlink.server.domain.task.TaskStatus;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.Pattern;
-import jakarta.validation.constraints.Positive;
 
 public record TaskListRequest(
         @Pattern(regexp = "mine|team")
@@ -12,9 +11,6 @@ public record TaskListRequest(
 
         @Pattern(regexp = "sent|received|all")
         String direction,
-
-        @Positive
-        Long agentId,
 
         TaskStatus status,
 
