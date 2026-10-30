@@ -8,9 +8,7 @@ import com.devlink.server.exception.InvalidTaskInputException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
-import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
-import org.hibernate.exception.ConstraintViolationException;
 import org.springframework.web.HttpMediaTypeNotAcceptableException;
 import org.springframework.web.HttpMediaTypeNotSupportedException;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
@@ -42,17 +40,6 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ApiResponse<Void>> handleUnexpected(Exception exception) {
         log.error("Unhandled request exception", exception);
         return response(ErrorCode.INTERNAL_SERVER_ERROR);
-    }
-
-    @ExceptionHandler(DataIntegrityViolationException.class)
-    public ResponseEntity<ApiResponse<Void>> handleIntegrityViolation(DataIntegrityViolationException exception) {
-        for (Throwable cause = exception; cause != null; cause = cause.getCause()) {
-            if (cause instanceof ConstraintViolationException violation
-                    && "uk_tasks_request_key".equals(violation.getConstraintName())) {
-                return response(ErrorCode.REQUEST_KEY_CONFLICT);
-            }
-        }
-        return handleUnexpected(exception);
     }
 
     @ExceptionHandler(ObjectOptimisticLockingFailureException.class)
