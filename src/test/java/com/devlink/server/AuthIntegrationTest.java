@@ -203,7 +203,7 @@ class AuthIntegrationTest extends AbstractIntegrationTest {
     }
 
     @Test
-    void loggedInSessionCreatesTaskUsingOwnedAgentParameter() throws Exception {
+    void logoutDoesNotRevokeAgentTokenOrRestoreUserSessionWhenCreatingTask() throws Exception {
         try (var browser = new Browser()) {
             long userId = signupAndLogin(browser, newEmail(), "Task owner");
             var team = teams.saveAndFlush(Team.create("Auth task team", UUID.randomUUID().toString()));
@@ -215,12 +215,12 @@ class AuthIntegrationTest extends AbstractIntegrationTest {
             var issued = browser.post("/api/v1/agents/" + requester.getId() + "/token", null, browser.csrf());
             assertSuccess(issued, 201);
             String token = issued.body().path("data").path("token").asText();
+            assertSuccess(browser.post("/api/v1/auth/logout", null, browser.csrf()), 200);
 
-            var response = browser.postWithAgentToken("/api/v1/tasks/" + team.getId()
-                    + "?agentId=" + requester.getId(), Map.of(
+            var response = browser.postWithAgentToken("/api/v1/tasks/" + team.getId(), Map.of(
                     "requestKey", UUID.randomUUID().toString(),
                     "receiverAgentId", receiver.getId(),
-                    "prompt", "Verify authenticated task creation"), browser.csrf(), token);
+                    "prompt", "Verify authenticated task creation"), token);
 
             assertSuccess(response, 201);
             long taskId = response.body().path("data").path("taskId").asLong();
@@ -228,11 +228,12 @@ class AuthIntegrationTest extends AbstractIntegrationTest {
             var task = tasks.findById(taskId).orElseThrow();
             assertThat(task.getRequesterUserId()).isEqualTo(userId);
             assertThat(task.getRequesterAgentId()).isEqualTo(requester.getId());
+            assertError(browser.get("/api/v1/auth/users/me"), 401, "AUTHENTICATION_REQUIRED");
         }
     }
 
     @Test
-    void taskApiChecksMembershipAndAgentOwnershipAtRequestBoundary() throws Exception {
+    void agentBearerDeterminesTaskIdentityWithoutChangingUserSession() throws Exception {
         try (var owner = new Browser(); var other = new Browser()) {
             long ownerId = signupAndLogin(owner, newEmail(), "Task owner");
             long otherId = signupAndLogin(other, newEmail(), "Other user");
@@ -246,24 +247,36 @@ class AuthIntegrationTest extends AbstractIntegrationTest {
             assertSuccess(issued, 201);
             String token = issued.body().path("data").path("token").asText();
             String requestKey = UUID.randomUUID().toString();
-            String path = "/api/v1/tasks/" + team.getId() + "?agentId=" + requester.getId();
+            String path = "/api/v1/tasks/" + team.getId();
             Map<String, Object> body = Map.of("requestKey", requestKey,
                     "receiverAgentId", receiver.getId(),
                     "prompt", "Verify permission before existing task controller");
 
-            assertError(other.postWithAgentToken(path, body, other.csrf(), token), 403, "ACCESS_DENIED");
+            String otherSessionId = other.sessionId();
+            var created = other.postWithAgentToken(path, body, token);
+            assertSuccess(created, 201);
+            long taskId = created.body().path("data").path("taskId").asLong();
+            var task = tasks.findById(taskId).orElseThrow();
+            assertThat(task.getRequesterUserId()).isEqualTo(ownerId);
+            assertThat(task.getRequesterAgentId()).isEqualTo(requester.getId());
+            assertThat(task.getTeamId()).isEqualTo(team.getId());
+            assertThat(other.sessionId()).isEqualTo(otherSessionId);
+            var me = other.get("/api/v1/auth/users/me");
+            assertSuccess(me, 200);
+            assertThat(me.body().path("data").path("userId").asLong()).isEqualTo(otherId);
+
             members.saveAndFlush(TeamMember.create(team.getId(), otherId, MemberRole.MEMBER));
-            assertError(other.postWithAgentToken(path, body, other.csrf(), token), 403, "ACCESS_DENIED");
+            var replayed = other.postWithAgentToken(path, body, token);
+            assertSuccess(replayed, 200);
+            assertThat(replayed.body().path("data").path("taskId").asLong()).isEqualTo(taskId);
             assertThat(tasks.findByRequesterUserIdAndRequestKey(otherId, requestKey)).isEmpty();
             assertError(owner.postWithAgentToken(path, Map.of("requestKey", requestKey,
-                    "prompt", "Missing receiver agent ID"), owner.csrf(), token), 400, "VALIDATION_FAILED");
-            assertError(owner.postWithAgentToken(path, null, owner.csrf(), token), 400, "VALIDATION_FAILED");
+                    "prompt", "Missing receiver agent ID"), token), 400, "VALIDATION_FAILED");
+            assertError(owner.postWithAgentToken(path, null, token), 400, "VALIDATION_FAILED");
 
-            var created = owner.postWithAgentToken(path, body, owner.csrf(), token);
-            assertSuccess(created, 201);
             members.deleteById(ownerMembership.getId());
-            assertError(owner.postWithAgentToken(path, body, owner.csrf(), token), 403, "ACCESS_DENIED");
-            assertThat(tasks.findById(created.body().path("data").path("taskId").asLong())).isPresent();
+            assertError(owner.postWithAgentToken(path, body, token), 401, "AUTHENTICATION_REQUIRED");
+            assertThat(tasks.findById(taskId)).isPresent();
         }
     }
 
@@ -469,8 +482,8 @@ class AuthIntegrationTest extends AbstractIntegrationTest {
             return send("POST", path, body, csrf);
         }
 
-        private HttpResult postWithAgentToken(String path, Object body, Csrf csrf, String token) throws Exception {
-            return send("POST", path, body, csrf, token);
+        private HttpResult postWithAgentToken(String path, Object body, String token) throws Exception {
+            return send("POST", path, body, null, token);
         }
 
         private Csrf csrf() throws Exception {

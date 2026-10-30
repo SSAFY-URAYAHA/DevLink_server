@@ -26,7 +26,7 @@
 
 세션은 서버 메모리에 저장하며 30분 동안 요청이 없으면 만료됩니다. 세션 쿠키는 HttpOnly이며 로컬에서는 SameSite=Lax, 운영에서는 HTTPS용 Secure와 SameSite=None을 사용합니다. 운영 브라우저가 서드파티 쿠키를 차단하면 별도 사이트 간 로그인 유지가 제한될 수 있습니다. 브라우저 로그아웃은 사용자 세션만 종료하며 Agent 토큰·브로커 연결을 폐기하지 않습니다.
 
-로그인 시 내부 `UserPrincipal(userId)`를 저장하고 권한 검사에 사용할 `userId`를 같은 세션에 기록합니다. 기존 작업 생성 API는 `POST /api/v1/tasks/{teamId}?agentId={요청 Agent ID}`이며 `Authorization` 헤더가 필요합니다. 본문은 `requestKey`, `receiverAgentId`, `prompt`만 받습니다. `TaskRequestAuthorizationAdvice`는 로그인 사용자의 팀 가입·쿼리로 지정한 요청 Agent의 소유권·송수신 Agent의 팀 일치를 확인합니다. 이 경로는 사용자 세션 인증을 유지하며, Agent 토큰만 사용하는 요청은 `/api/v1/agent/tasks`를 이용합니다. 팀원의 작업 생성 Controller와 Service는 변경하지 않습니다. 권한 조회와 작업 저장은 별도 트랜잭션입니다. OAuth 외부 계정 연결과 다중 서버용 세션 저장소는 후속 범위입니다.
+로그인 시 내부 `UserPrincipal(userId)`를 저장하고 권한 검사에 사용할 `userId`를 같은 세션에 기록합니다. 사용자 인증·팀 관리·Agent 등록·토큰 발급은 이 사용자 세션과 CSRF 계약을 유지합니다. 작업 생성·상태 변경·조회는 아래의 Agent Bearer 인증을 사용합니다. OAuth 외부 계정 연결과 다중 서버용 세션 저장소는 후속 범위입니다.
 
 ## 6-1. 팀 관리 및 공통 팀 권한
 
@@ -80,14 +80,39 @@
 
 ## 6-3. MCP·브로커용 Agent 인증
 
-`/ws/broker`와 `/api/v1/agent/**`는 `Authorization: Bearer <Agent 토큰>`으로 인증합니다. 사용자 세션과 서로 대체하지 않습니다. DB의 현재 토큰 해시와 소유자의 팀 가입을 확인해 `AgentPrincipal(agentId, ownerUserId, teamId)`를 구성합니다. Agent 전용 REST는 쿠키 인증을 사용하지 않아 해당 체인에만 CSRF 예외를 적용하며, 사용자 관리 API의 CSRF 보호는 유지합니다.
+`/ws/broker`, `/api/v1/agent/**`, `/api/v1/tasks/**`와 `GET /api/v1/teams/{teamId}/tasks`는 `Authorization: Bearer <Agent 토큰>`으로 인증합니다. 사용자 세션과 서로 대체하지 않습니다. DB의 현재 토큰 해시와 소유자의 팀 가입을 확인해 `AgentPrincipal(agentId, ownerUserId, teamId)`를 구성합니다. Agent 전용 REST는 쿠키 인증을 사용하지 않아 해당 체인에만 CSRF 예외를 적용하며, 사용자 관리 API의 CSRF 보호는 유지합니다.
 
 | 메서드 | 경로 | 동작 |
 | --- | --- | --- |
 | GET | `/api/v1/agent/context` | 토큰의 Agent 정보 확인 |
 | GET | `/api/v1/agent/agents` | 토큰의 팀에 속한 Agent 목록 |
-| POST | `/api/v1/agent/tasks` | `{requestKey, receiverAgentId, prompt}`로 작업 생성 |
+| POST | `/api/v1/tasks/{teamId}` | `{requestKey, receiverAgentId, prompt}`로 작업 생성 |
+| PATCH | `/api/v1/tasks/{taskId}/status` | 토큰의 Agent로 작업 상태 변경 |
+| GET | `/api/v1/teams/{teamId}/tasks` | 토큰의 Agent 권한으로 팀의 작업 목록 조회 |
+| GET | `/api/v1/tasks/{taskId}` | 토큰의 Agent 권한으로 작업 상세 조회 |
 
-Agent 작업 생성은 요청 사용자·요청 Agent·팀을 토큰에서 채워 기존 생성 서비스를 공유합니다. 수락·완료·결과 조회는 각각 4·5번 담당자의 API에 같은 인증·권한 계약을 적용해야 합니다.
+작업 생성 경로는 `/api/v1/tasks/{teamId}`로 통일하며 `/api/v1/agent/tasks`는 사용하지 않습니다. 생성·상태 변경 시 `agentId` 쿼리를 사용하지 않고 인증된 `AgentPrincipal.agentId`를 사용합니다. 요청 사용자와 요청 Agent의 신원은 본문·쿼리가 아닌 토큰으로 결정합니다. 작업 생성 본문의 `requestKey`, `receiverAgentId`, `prompt`와 기존 작업 생성 서비스를 유지합니다.
 
-`register_agent`·`list_agents`의 TypeScript 도구 정의와 중앙 REST 클라이언트는 별도 `DevLink_client` 저장소의 신규 모듈로 제공합니다. 기존 MCP 공통 설정·실행·도구 등록 파일은 변경하지 않으며 실제 도구 등록과 호출 경로 연결은 2번 담당자가 수행해야 합니다. `packages/mcp-server/AGENT_MANAGEMENT.md`에 연결 계약을 정리했습니다. 최초 등록은 로그인 사용자 세션과 CSRF로 등록·토큰 발급을 수행하고 이후 목록은 Agent 토큰으로 조회합니다. 토큰은 모델의 도구 입력·출력에 포함하지 않습니다. CLI의 자격정보 영구 보관과 브로커의 로컬 실행·WebSocket 연결 규약은 1·2·6번 담당자의 연동 범위입니다. `projectName`은 표시 정보이며 실제 작업 폴더는 로컬 실행 설정으로 지정해야 합니다.
+`TaskRequestAuthorizationAdvice`는 인증된 요청 Agent를 기준으로 `TaskAuthorizationService.requireRequester`를 호출해 팀 가입·요청 Agent 소유권·송수신 Agent의 팀 일치를 확인합니다. 생성 URL의 팀과 토큰의 팀이 다르면 403이며, 수신 Agent가 없거나 다른 팀에 속하면 404입니다. 권한 조회와 작업 저장은 별도 트랜잭션입니다. 상태 변경·조회는 각 담당 서비스의 기존 권한·상태 규칙을 유지합니다.
+
+`/api/v1/agent/context`와 `/api/v1/agent/agents`는 Agent 토큰용 조회 경로로 유지합니다. 특히 최신 CLI는 토큰 발급 직후·Agent 상태 조회·브로커 시작 전에 `/api/v1/agent/context`를 호출해 저장된 토큰의 Agent·소유자·팀을 확인합니다. 사용자 세션용 복수 경로 `/api/v1/agents/**`와 인증 주체가 다릅니다.
+
+## 6-4. 최신 CLI의 사용자·팀·Agent 준비 흐름
+
+`DevLink_client`의 Rust CLI는 사용자 세션, 중앙 Agent 토큰, 로컬 MCP 자격정보를 구분해 관리합니다. 회원가입은 사용자 인증 API나 프론트엔드에서 먼저 수행하며 CLI의 `auth` 명령은 로그인·상태 확인·로그아웃을 제공합니다.
+
+1. `devlink auth login --email <이메일>`: `GET /api/v1/auth/csrf` 후 `POST /api/v1/auth/login`을 호출합니다. 비밀번호는 숨김 입력 또는 표준 입력으로 받고 명령행 인자로 받지 않습니다.
+2. 로그인 직후 `/api/v1/auth/users/me`로 신원을 확인하고 회전된 `JSESSIONID`를 로컬 비공개 세션 파일에 저장합니다. CSRF 토큰도 다시 조회하며 이후 POST 직전에 새로 조회합니다. 팀·Agent 관리 호출은 이 세션을 사용합니다.
+3. `devlink team create --name <이름>` 또는 `devlink team join`: 팀 생성이나 초대코드 참여 API를 호출합니다. 생성·참여 후 팀 상세와 팀원 목록으로 현재 사용자의 가입 정보를 확인합니다.
+4. `devlink team select --id <팀 ID>`: 서버에서 팀·가입 정보를 확인한 뒤 선택한 팀을 로컬에 저장합니다. 별도의 팀 선택 REST API를 호출하지 않습니다.
+5. `devlink agent create --name <이름> --tool <codex|claude-code> --project-name <표시 이름> --project <로컬 폴더>`: 선택한 팀에 Agent를 생성한 뒤 토큰 발급 API를 별도로 호출합니다. 등록과 토큰 발급은 두 API이며 등록 응답 자체에는 토큰이 없습니다.
+6. 발급한 토큰을 `/api/v1/agent/context`로 검증하고 Agent·사용자·팀·로컬 작업 폴더·토큰을 로컬 비공개 프로필에 저장합니다. 기존 Agent는 `devlink agent use --id <Agent ID>`로 소유권을 확인해 선택할 수 있으며, 필요한 토큰 발급은 `devlink agent token`으로 명시적으로 수행합니다.
+7. `devlink agent status`와 브로커 시작 시 저장된 Agent 토큰을 다시 검증합니다. 사용자 로그아웃은 사용자 세션을 종료하며 별도의 Agent 토큰을 폐기하지 않습니다.
+
+Agent 생성 결과가 불명확하면 CLI가 자동으로 다시 생성하지 않습니다. `agent list`로 서버 상태를 확인하고 기존 Agent ID를 선택하는 흐름을 사용합니다. `projectName`은 표시 정보이며 실제 작업 폴더는 로컬 프로필의 경로로 지정합니다.
+
+## 6-5. MCP 도구 실행부와의 구분
+
+`register_agent`·`list_agents`의 TypeScript 도구 정의와 별도 중앙 REST 클라이언트는 `DevLink_client` 저장소에 있습니다. `packages/mcp-server/AGENT_MANAGEMENT.md`의 별도 모듈은 최초 호출에서 사용자 세션과 CSRF로 등록·토큰 발급을 수행하는 흐름을 설명하지만, 현재 MCP 공통 실행부에 자동으로 연결되어 있지는 않습니다.
+
+최신 CLI의 준비 흐름은 위와 같이 MCP 호출 전에 Agent 등록·토큰 발급·로컬 프로필 저장을 수행합니다. 따라서 최초 `register_agent` 호출이 반드시 새로운 Agent를 생성한다고 가정하면 안 됩니다. CLI로 준비한 Agent와 MCP 세션을 어떻게 연결할지는 실제 도구 등록·호출 경로를 담당하는 1·2번 담당자의 연동 범위입니다. 이번 백엔드 인증 변경은 MCP 실행부나 도구 등록 코드를 변경하지 않습니다. 토큰은 모델의 도구 입력·출력에 포함하지 않습니다.

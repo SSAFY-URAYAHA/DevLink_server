@@ -5,7 +5,7 @@ import java.util.Map;
 import com.devlink.server.common.BusinessException;
 import com.devlink.server.common.ErrorCode;
 import com.devlink.server.controller.TaskController;
-import com.devlink.server.domain.UserPrincipal;
+import com.devlink.server.domain.AgentPrincipal;
 import com.devlink.server.dto.CreateTaskRequest;
 import com.devlink.server.service.TaskAuthorizationService;
 import jakarta.servlet.http.HttpServletRequest;
@@ -41,27 +41,25 @@ public class TaskRequestAuthorizationAdvice extends RequestBodyAdviceAdapter {
             throw new BusinessException(ErrorCode.AUTHENTICATION_REQUIRED);
         }
         HttpServletRequest request = attributes.getRequest();
-        Long userId = requireUserId(request);
+        AgentPrincipal agent = requireAgent(request);
         Long teamId = requireTeamId(request);
-        Long requesterAgentId = requireRequesterAgentId(request);
-        // 기존 작업 Controller를 수정하지 않고 웹 요청 경계에서 권한 확인
+        if (agent.teamId() != teamId.longValue()) {
+            throw new BusinessException(ErrorCode.ACCESS_DENIED);
+        }
+        // 토큰으로 확인한 Agent 신원을 사용해 작업 요청 권한 확인
         // 권한 조회와 기존 작업 저장은 별도 트랜잭션으로 처리
-        authorization.requireRequester(userId, teamId, requesterAgentId, taskRequest.receiverAgentId());
+        authorization.requireRequester(agent.ownerUserId(), teamId, agent.agentId(), taskRequest.receiverAgentId());
         return body;
     }
 
-    private Long requireUserId(HttpServletRequest request) {
+    private AgentPrincipal requireAgent(HttpServletRequest request) {
         if (!(request.getUserPrincipal() instanceof Authentication authentication)
                 || !authentication.isAuthenticated()
-                || !(authentication.getPrincipal() instanceof UserPrincipal user)) {
+                || !(authentication.getPrincipal() instanceof AgentPrincipal agent)
+                || agent.agentId() <= 0 || agent.ownerUserId() <= 0 || agent.teamId() <= 0) {
             throw new BusinessException(ErrorCode.AUTHENTICATION_REQUIRED);
         }
-        var session = request.getSession(false);
-        if (session == null || !(session.getAttribute("userId") instanceof Long userId)
-                || userId <= 0 || userId.longValue() != user.userId()) {
-            throw new BusinessException(ErrorCode.AUTHENTICATION_REQUIRED);
-        }
-        return userId;
+        return agent;
     }
 
     private Long requireTeamId(HttpServletRequest request) {
@@ -80,19 +78,4 @@ public class TaskRequestAuthorizationAdvice extends RequestBodyAdviceAdapter {
         }
     }
 
-    private Long requireRequesterAgentId(HttpServletRequest request) {
-        String agentId = request.getParameter("agentId");
-        if (agentId == null) {
-            throw new BusinessException(ErrorCode.VALIDATION_FAILED);
-        }
-        try {
-            long value = Long.parseLong(agentId);
-            if (value <= 0) {
-                throw new BusinessException(ErrorCode.VALIDATION_FAILED);
-            }
-            return value;
-        } catch (NumberFormatException exception) {
-            throw new BusinessException(ErrorCode.VALIDATION_FAILED);
-        }
-    }
 }
