@@ -14,6 +14,8 @@ import org.springframework.data.domain.Pageable;
 
 
 public interface TaskRepository extends JpaRepository<Task, Long> {
+    boolean existsByRequesterAgentIdOrReceiverAgentId(Long requesterAgentId, Long receiverAgentId);
+
     Optional<Task> findByRequesterAgentIdAndRequestKey(Long requesterAgentId, String requestKey);
 
     @Lock(LockModeType.PESSIMISTIC_WRITE)
@@ -21,7 +23,7 @@ public interface TaskRepository extends JpaRepository<Task, Long> {
     Optional<Task> findByIdForUpdate(@Param("taskId") Long taskId);
 
     List<Task> findByTeamIdOrderByCreatedAtDesc(Long teamId);
-    
+
     @Query("""
             select task
             from Task task
@@ -33,8 +35,8 @@ public interface TaskRepository extends JpaRepository<Task, Long> {
     		@Param("teamId")Long teamId,
     		@Param("status")TaskStatus status,
     		Pageable pageable);
-    
-    
+
+
     @Query("""
             select task
             from Task task
@@ -62,5 +64,5 @@ public interface TaskRepository extends JpaRepository<Task, Long> {
             @Param("status") TaskStatus status,
             Pageable pageable
     );
-    
+
 }

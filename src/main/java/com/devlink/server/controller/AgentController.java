@@ -4,6 +4,7 @@ import java.util.List;
 import com.devlink.server.common.ApiResponse;
 import com.devlink.server.common.BusinessException;
 import com.devlink.server.common.ErrorCode;
+import com.devlink.server.domain.AgentPrincipal;
 import com.devlink.server.domain.UserPrincipal;
 import com.devlink.server.dto.AgentResponse;
 import com.devlink.server.dto.CreateAgentRequest;
@@ -15,6 +16,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -38,14 +40,31 @@ public class AgentController {
 
     @GetMapping("/teams/{teamId}")
     public ApiResponse<List<AgentResponse>> list(@PathVariable @Positive Long teamId,
-            @AuthenticationPrincipal UserPrincipal principal) {
-        return ApiResponse.success(agents.list(userId(principal), teamId));
+            @AuthenticationPrincipal Object principal) {
+        if (principal instanceof AgentPrincipal agent) {
+            // Agent 토큰은 해당 Agent가 속한 팀의 목록만 조회 허용
+            if (agent.teamId() != teamId.longValue()) {
+                throw new BusinessException(ErrorCode.ACCESS_DENIED);
+            }
+            return ApiResponse.success(agents.list(agent.ownerUserId(), teamId));
+        }
+        if (principal instanceof UserPrincipal user) {
+            return ApiResponse.success(agents.list(userId(user), teamId));
+        }
+        throw new BusinessException(ErrorCode.AUTHENTICATION_REQUIRED);
     }
 
     @GetMapping("/{agentId}")
     public ApiResponse<AgentResponse> get(@PathVariable @Positive Long agentId,
             @AuthenticationPrincipal UserPrincipal principal) {
         return ApiResponse.success(agents.get(userId(principal), agentId));
+    }
+
+    @DeleteMapping("/{agentId}")
+    public ApiResponse<Void> delete(@PathVariable @Positive Long agentId,
+            @AuthenticationPrincipal UserPrincipal principal) {
+        agents.delete(userId(principal), agentId);
+        return ApiResponse.success(null);
     }
 
     private Long userId(UserPrincipal principal) {

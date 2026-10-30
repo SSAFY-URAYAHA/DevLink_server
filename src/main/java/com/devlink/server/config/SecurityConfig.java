@@ -12,6 +12,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.annotation.Order;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
@@ -29,6 +30,7 @@ import org.springframework.security.web.context.RequestAttributeSecurityContextR
 import org.springframework.security.web.context.SecurityContextRepository;
 import org.springframework.security.web.csrf.CsrfAuthenticationStrategy;
 import org.springframework.security.web.csrf.HttpSessionCsrfTokenRepository;
+import org.springframework.security.web.servlet.util.matcher.PathPatternRequestMatcher;
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
@@ -71,8 +73,13 @@ public class SecurityConfig {
             var delegate = verifiers.getIfAvailable();
             return delegate == null ? Optional.empty() : delegate.verify(token);
         };
+        var agentList = PathPatternRequestMatcher.withDefaults()
+                .matcher(HttpMethod.GET, "/api/v1/agents/teams/{teamId}");
         http.securityMatchers(matchers -> matchers
-        		.requestMatchers("/api/v1/agent/**")
+                // 목록 GET의 Authorization 헤더가 있으면 Agent 인증 우선 적용
+                .requestMatchers(request -> agentList.matches(request)
+                        && request.getHeader(HttpHeaders.AUTHORIZATION) != null)
+                .requestMatchers("/api/v1/agents/me")
                 .requestMatchers("/api/v1/tasks", "/api/v1/tasks/**")
         		.requestMatchers(
         				HttpMethod.GET,
