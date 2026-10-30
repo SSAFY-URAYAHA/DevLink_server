@@ -14,7 +14,7 @@ import org.springframework.data.domain.Pageable;
 
 
 public interface TaskRepository extends JpaRepository<Task, Long> {
-    Optional<Task> findByRequesterUserIdAndRequestKey(Long requesterUserId, String requestKey);
+    Optional<Task> findByRequesterAgentIdAndRequestKey(Long requesterAgentId, String requestKey);
 
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select t from Task t where t.id = :taskId")

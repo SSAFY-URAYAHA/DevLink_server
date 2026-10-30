@@ -138,13 +138,12 @@ public class TaskCreationService {
                 .filter(agent -> agent.getTeamId().equals(teamId))
                 .orElseThrow(() -> new BusinessException(ErrorCode.RESOURCE_NOT_FOUND));
         Long userId = requester.getOwnerUserId();
-        // 1. 요청 키로 생성된 작업 찾기
-        var existing = taskRepository.findByRequesterUserIdAndRequestKey(userId, request.requestKey());
-        // 2. 기존 작업이 있으면 요청 내용 비교
+        // 1. 요청 Agent + 요청 키로 생성된 작업 찾기 (유니크 제약과 같은 범위)
+        var existing = taskRepository.findByRequesterAgentIdAndRequestKey(agentId, request.requestKey());
+        // 2. 기존 작업이 있으면 요청 내용 비교 (요청 Agent는 조회 조건이므로 비교 불필요)
         if (existing.isPresent()) {
             Task task = existing.get();
             if (!task.getTeamId().equals(teamId)
-                    || !task.getRequesterAgentId().equals(agentId)
                     || !task.getReceiverAgentId().equals(request.receiverAgentId())
                     || !task.getPrompt().equals(request.prompt())) {
                 // 2-1. 기존 작업이 있는데 내용이 다른 경우 요청키를 잘못 재사용한것

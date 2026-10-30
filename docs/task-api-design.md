@@ -91,7 +91,7 @@ DB의 `Agent.status`만으로 실제 연결을 판단하지 않는다. 6번 담�
 
 ### 중복 요청과 동시 생성
 
-- 기존 `(requester_user_id, request_key)` 유니크 제약을 유지한다. Agent 단위가 아닌 사용자 단위 키다.
+- `(requester_agent_id, request_key)` 유니크 제약을 사용한다. 키는 브로커(Agent)가 생성·재시도하므로 사용자 단위가 아닌 요청 Agent 단위 키다.
 - 기존 요청과 `teamId`, `requesterAgentId`, `receiverAgentId`, `prompt`가 같으면 같은 작업 ID와 현재 상태·버전을 반환한다. 최초 HTTP 응답 바이트를 재생하는 계약은 아니다.
 - 같은 키에 다른 payload 또는 다른 요청 Agent를 사용하면 `409 REQUEST_KEY_CONFLICT`. 기존 작업 내용은 노출하지 않는다.
 - 기존 요청 확인은 온라인 검사보다 먼저 한다. 이미 생성된 작업의 재조회는 수신자가 현재 오프라인이어도 가능하다.
@@ -203,7 +203,7 @@ TaskStatusService.changeStatus() — @Transactional
 
 ### 생성 시 중복은 별도 문제
 
-새 Task에는 경쟁할 기존 행이 없으므로 `@Version`이 중복 생성을 막아주지 않는다. 생성 트랜잭션에서 Task와 CREATED 이력을 함께 저장하고, `(requester_user_id, request_key)` 유니크 제약으로 중복을 막는다. 충돌 요청은 롤백 뒤 기존 결과를 조회한다. 상태가 같아도 키가 다르면 별개 작업이다.
+새 Task에는 경쟁할 기존 행이 없으므로 `@Version`이 중복 생성을 막아주지 않는다. 생성 트랜잭션에서 Task와 CREATED 이력을 함께 저장하고, `(requester_agent_id, request_key)` 유니크 제약으로 중복을 막는다. 충돌 요청은 롤백 뒤 기존 결과를 조회한다. 상태가 같아도 키가 다르면 별개 작업이다.
 
 ### 상황별 처리
 
