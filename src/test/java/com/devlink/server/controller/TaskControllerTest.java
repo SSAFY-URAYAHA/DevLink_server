@@ -193,16 +193,17 @@ class TaskControllerTest {
                 new UsernamePasswordAuthenticationToken(principal, null, List.of()));
     }
 
+    /** 키 경합은 서비스가 replay로 복구한다. 컨트롤러까지 올라온 위반은 분류 불가이므로 409로 위장하지 않는다. */
     @Test
-    void concurrentRequestKeyViolationReturns409() throws Exception {
+    void requestKeyViolationReachingControllerIsServerError() throws Exception {
         var violation = new ConstraintViolationException("duplicate", new SQLException("duplicate"),
                 "uk_tasks_request_key");
         when(service.create(anyLong(), anyLong(), any()))
                 .thenThrow(new DataIntegrityViolationException("duplicate", violation));
         mvc.perform(post("/api/v1/tasks/1")
                         .contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(valid)))
-                .andExpect(status().isConflict())
-                .andExpect(jsonPath("$.code").value("REQUEST_KEY_CONFLICT"));
+                .andExpect(status().isInternalServerError())
+                .andExpect(jsonPath("$.code").value("INTERNAL_SERVER_ERROR"));
     }
 
     @Test

@@ -282,17 +282,55 @@ class TaskCreationIntegrationTest extends AbstractIntegrationTest {
     }
 
     @Test
-    void concurrentInsertConflictPropagatesAndOnlyOneTaskAndHistoryCommit() throws Exception {
+    void concurrentInsertLoserRecoversAsReplayAndOnlyWinnerDelivers() throws Exception {
         var ready = new CountDownLatch(2);
-        // Force both requests past the same empty pre-check; INSERT and rollback use PostgreSQL.
-        doAnswer(invocation -> {
+        // Force both requests past the same empty pre-check once; INSERT, rollback and the
+        // recovery lookup use PostgreSQL.
+        org.mockito.stubbing.Answer<Object> gate = invocation -> {
             ready.countDown();
             if (!ready.await(10, TimeUnit.SECONDS)) throw new IllegalStateException("Missing concurrent request");
             return java.util.Optional.empty();
-        }).when(tasks).findByRequesterAgentIdAndRequestKey(agentId, request.requestKey());
+        };
+        // Both pre-checks see empty; every later call (recovery lookup) reads the committed row.
+        // doCallRealMethod is unavailable on the repository proxy, so go through an unstubbed query.
+        org.mockito.stubbing.Answer<Object> committed = invocation -> tasks.findByTeamIdOrderByCreatedAtDesc(teamId)
+                .stream().filter(t -> t.getRequesterAgentId().equals(agentId)
+                        && t.getRequestKey().equals(request.requestKey())).findFirst();
+        doAnswer(gate).doAnswer(gate).doAnswer(committed)
+                .when(tasks).findByRequesterAgentIdAndRequestKey(agentId, request.requestKey());
         try (var executor = Executors.newFixedThreadPool(2)) {
             var first = executor.submit(() -> service.create(teamId, agentId, request));
             var second = executor.submit(() -> service.create(teamId, agentId, request));
+            var results = java.util.List.of(first.get(20, TimeUnit.SECONDS), second.get(20, TimeUnit.SECONDS));
+            assertThat(results).extracting(r -> r.replayed()).containsExactlyInAnyOrder(false, true);
+            assertThat(results).extracting(r -> r.taskId()).containsOnly(results.getFirst().taskId());
+            var saved = tasks.findByTeamIdOrderByCreatedAtDesc(teamId);
+            assertThat(saved).hasSize(1);
+            assertThat(events.findByTaskIdOrderByCreatedAtAsc(saved.getFirst().getId()))
+                    .extracting(TaskEvent::getEventType).containsExactly(TaskEventType.CREATED, TaskEventType.ACK_PENDING);
+            verify(routing, times(1)).sendTask(saved.getFirst().getId());
+        }
+    }
+
+    @Test
+    void concurrentInsertLoserWithDifferentPayloadConflicts() throws Exception {
+        var ready = new CountDownLatch(2);
+        org.mockito.stubbing.Answer<Object> gate = invocation -> {
+            ready.countDown();
+            if (!ready.await(10, TimeUnit.SECONDS)) throw new IllegalStateException("Missing concurrent request");
+            return java.util.Optional.empty();
+        };
+        // Both pre-checks see empty; every later call (recovery lookup) reads the committed row.
+        // doCallRealMethod is unavailable on the repository proxy, so go through an unstubbed query.
+        org.mockito.stubbing.Answer<Object> committed = invocation -> tasks.findByTeamIdOrderByCreatedAtDesc(teamId)
+                .stream().filter(t -> t.getRequesterAgentId().equals(agentId)
+                        && t.getRequestKey().equals(request.requestKey())).findFirst();
+        doAnswer(gate).doAnswer(gate).doAnswer(committed)
+                .when(tasks).findByRequesterAgentIdAndRequestKey(agentId, request.requestKey());
+        var changed = new CreateTaskRequest(request.requestKey(), agentId, "Different prompt");
+        try (var executor = Executors.newFixedThreadPool(2)) {
+            var first = executor.submit(() -> service.create(teamId, agentId, request));
+            var second = executor.submit(() -> service.create(teamId, agentId, changed));
             int successes = 0;
             int conflicts = 0;
             for (var future : java.util.List.of(first, second)) {
@@ -300,16 +338,39 @@ class TaskCreationIntegrationTest extends AbstractIntegrationTest {
                     assertThat(future.get(20, TimeUnit.SECONDS).replayed()).isFalse();
                     successes++;
                 } catch (ExecutionException exception) {
-                    assertThat(exception.getCause()).isInstanceOf(DataIntegrityViolationException.class);
+                    assertThat(exception.getCause()).isInstanceOfSatisfying(BusinessException.class,
+                            error -> assertThat(error.getErrorCode()).isEqualTo(ErrorCode.REQUEST_KEY_CONFLICT));
                     conflicts++;
                 }
             }
             assertThat(successes).isEqualTo(1);
             assertThat(conflicts).isEqualTo(1);
-            var saved = tasks.findByTeamIdOrderByCreatedAtDesc(teamId);
-            assertThat(saved).hasSize(1);
-            assertThat(events.findByTaskIdOrderByCreatedAtAsc(saved.getFirst().getId()))
-                    .extracting(TaskEvent::getEventType).containsExactly(TaskEventType.CREATED, TaskEventType.ACK_PENDING);
+            assertThat(tasks.findByTeamIdOrderByCreatedAtDesc(teamId)).hasSize(1);
         }
+    }
+
+    @Test
+    void nonKeyConstraintViolationIsNotRecovered() {
+        var violation = new org.hibernate.exception.ConstraintViolationException("other",
+                new java.sql.SQLException("other"), "fk_tasks_other");
+        var failure = new DataIntegrityViolationException("other", violation);
+        doThrow(failure).when(tasks).save(any());
+        assertThatThrownBy(() -> service.create(teamId, agentId, request)).isSameAs(failure);
+        // Only the pre-check ran; no recovery lookup for an unrelated constraint.
+        verify(tasks, times(1)).findByRequesterAgentIdAndRequestKey(agentId, request.requestKey());
+        assertThat(tasks.findByTeamIdOrderByCreatedAtDesc(teamId)).isEmpty();
+    }
+
+    @Test
+    void keyConflictWithoutRecoverableTaskRethrowsOriginal() {
+        var violation = new org.hibernate.exception.ConstraintViolationException("duplicate",
+                new java.sql.SQLException("duplicate"), "uk_tasks_request_key");
+        var failure = new DataIntegrityViolationException("duplicate", violation);
+        doThrow(failure).when(tasks).save(any());
+        assertThatThrownBy(() -> service.create(teamId, agentId, request)).isSameAs(failure);
+        // Pre-check plus one recovery lookup, nothing written, no delivery.
+        verify(tasks, times(2)).findByRequesterAgentIdAndRequestKey(agentId, request.requestKey());
+        assertThat(tasks.findByTeamIdOrderByCreatedAtDesc(teamId)).isEmpty();
+        verify(routing, never()).sendTask(anyLong());
     }
 }
