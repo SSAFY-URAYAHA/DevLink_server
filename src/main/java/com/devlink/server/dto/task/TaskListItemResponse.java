@@ -1,0 +1,17 @@
+package com.devlink.server.dto.task;
+
+import com.devlink.server.domain.task.TaskStatus;
+
+import java.time.LocalDateTime;
+
+public record TaskListItemResponse(
+        Long taskId,
+        Long teamId,
+        TaskAgentResponse requesterAgent,
+        TaskAgentResponse receiverAgent,
+        TaskStatus status,
+        LocalDateTime createdAt,
+        LocalDateTime startedAt,
+        LocalDateTime completedAt
+) {
+}
