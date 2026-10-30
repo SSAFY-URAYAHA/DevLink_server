@@ -18,10 +18,12 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.TimeUnit;
 import com.devlink.server.domain.agent.AgentStatus;
+import com.devlink.server.domain.task.TaskStatus;
 import com.devlink.server.domain.teammember.MemberRole;
 import com.devlink.server.domain.teammember.TeamMember;
 import com.devlink.server.realtime.ConnectionRegistry;
 import com.devlink.server.repository.AgentRepository;
+import com.devlink.server.repository.TaskEventRepository;
 import com.devlink.server.repository.TaskRepository;
 import com.devlink.server.repository.TeamMemberRepository;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -37,6 +39,7 @@ class AgentTokenIntegrationTest extends AbstractIntegrationTest {
     @Autowired private ObjectMapper json;
     @Autowired private AgentRepository agents;
     @Autowired private TaskRepository tasks;
+    @Autowired private TaskEventRepository taskEvents;
     @Autowired private TeamMemberRepository members;
     @Autowired private ConnectionRegistry connections;
 
@@ -70,7 +73,7 @@ class AgentTokenIntegrationTest extends AbstractIntegrationTest {
             assertThat(secondContext.body().path("data").path("agentId").asLong()).isEqualTo(secondAgentId);
 
             String requestKey = UUID.randomUUID().toString();
-            var createdTask = machine("POST", "/api/v1/agent/tasks", Map.of(
+            var createdTask = machine("POST", "/api/v1/tasks/" + teamId, Map.of(
                     "requestKey", requestKey,
                     "receiverAgentId", secondAgentId,
                     "requesterAgentId", secondAgentId,
@@ -85,6 +88,99 @@ class AgentTokenIntegrationTest extends AbstractIntegrationTest {
             assertThat(task.getRequesterUserId()).isEqualTo(firstUserId);
             assertThat(task.getReceiverAgentId()).isEqualTo(secondAgentId);
             assertThat(task.getTeamId()).isEqualTo(teamId);
+        }
+    }
+
+    @Test
+    void taskCreationRequiresAgentTokenEvenWithLoggedInSessionAndCsrf() throws Exception {
+        try (var owner = new Browser()) {
+            long userId = owner.signupAndLogin();
+            long teamId = owner.createTeam();
+            long requesterId = owner.createAgent(teamId);
+            long receiverId = owner.createAgent(teamId);
+            owner.issueToken(requesterId);
+            String requestKey = UUID.randomUUID().toString();
+            String path = "/api/v1/tasks/" + teamId;
+            Map<String, Object> body = Map.of("requestKey", requestKey,
+                    "receiverAgentId", receiverId, "prompt", "Require an Agent credential");
+
+            assertError(owner.mutate("POST", path, body), 401, "AUTHENTICATION_REQUIRED");
+            assertError(machine("POST", path, body, null), 401, "AUTHENTICATION_REQUIRED");
+            assertError(machine("POST", path, body, "unrecognized-token"),
+                    401, "AUTHENTICATION_REQUIRED");
+            assertThat(tasks.findByRequesterUserIdAndRequestKey(userId, requestKey)).isEmpty();
+        }
+    }
+
+    @Test
+    void taskCreationRejectsAnotherTeamPathAndAnotherTeamsReceiver() throws Exception {
+        try (var owner = new Browser()) {
+            long userId = owner.signupAndLogin();
+            long teamId = owner.createTeam();
+            long otherTeamId = owner.createTeam();
+            long requesterId = owner.createAgent(teamId);
+            long receiverId = owner.createAgent(teamId);
+            long otherReceiverId = owner.createAgent(otherTeamId);
+            String token = owner.issueToken(requesterId);
+            String wrongTeamKey = UUID.randomUUID().toString();
+            String wrongReceiverKey = UUID.randomUUID().toString();
+
+            assertError(machine("POST", "/api/v1/tasks/" + otherTeamId, Map.of(
+                    "requestKey", wrongTeamKey, "receiverAgentId", receiverId,
+                    "prompt", "Use a team outside the credential context"), token),
+                    403, "ACCESS_DENIED");
+            assertError(machine("POST", "/api/v1/tasks/" + teamId, Map.of(
+                    "requestKey", wrongReceiverKey, "receiverAgentId", otherReceiverId,
+                    "prompt", "Use a receiver outside the credential team"), token),
+                    404, "RESOURCE_NOT_FOUND");
+            assertThat(tasks.findByRequesterUserIdAndRequestKey(userId, wrongTeamKey)).isEmpty();
+            assertThat(tasks.findByRequesterUserIdAndRequestKey(userId, wrongReceiverKey)).isEmpty();
+        }
+    }
+
+    @Test
+    void taskUsesTokenIdentityDespiteSpoofedQueryAndOnlyReceiverTokenCanAccept() throws Exception {
+        try (var owner = new Browser()) {
+            long userId = owner.signupAndLogin();
+            long teamId = owner.createTeam();
+            long requesterId = owner.createAgent(teamId);
+            long receiverId = owner.createAgent(teamId);
+            String requesterToken = owner.issueToken(requesterId);
+            String receiverToken = owner.issueToken(receiverId);
+            String requestKey = UUID.randomUUID().toString();
+
+            var created = machine("POST", "/api/v1/tasks/" + teamId + "?agentId=" + receiverId, Map.of(
+                    "requestKey", requestKey, "receiverAgentId", receiverId,
+                    "requesterAgentId", receiverId, "prompt", "Use the authenticated requester"), requesterToken);
+            assertSuccess(created, 201);
+            long taskId = created.body().path("data").path("taskId").asLong();
+            var before = tasks.findById(taskId).orElseThrow();
+            assertThat(before.getRequesterAgentId()).isEqualTo(requesterId);
+            assertThat(before.getRequesterUserId()).isEqualTo(userId);
+            assertThat(before.getReceiverAgentId()).isEqualTo(receiverId);
+            assertThat(before.getTeamId()).isEqualTo(teamId);
+            assertThat(before.getStatus()).isEqualTo(TaskStatus.PENDING);
+            long version = before.getVersion();
+            int eventCount = taskEvents.findByTaskIdOrderByCreatedAtAsc(taskId).size();
+            Map<String, Object> acceptance = Map.of("status", "IN_PROGRESS", "version", version);
+
+            assertError(machine("PATCH", "/api/v1/tasks/" + taskId + "/status?agentId=" + receiverId,
+                    acceptance, requesterToken), 403, "ACCESS_DENIED");
+            var unchanged = tasks.findById(taskId).orElseThrow();
+            assertThat(unchanged.getStatus()).isEqualTo(TaskStatus.PENDING);
+            assertThat(unchanged.getVersion()).isEqualTo(version);
+            assertThat(unchanged.getStartedAt()).isNull();
+            assertThat(unchanged.getCompletedAt()).isNull();
+            assertThat(taskEvents.findByTaskIdOrderByCreatedAtAsc(taskId)).hasSize(eventCount);
+
+            var accepted = machine("PATCH", "/api/v1/tasks/" + taskId + "/status",
+                    acceptance, receiverToken);
+            assertSuccess(accepted, 200);
+            var saved = tasks.findById(taskId).orElseThrow();
+            assertThat(saved.getStatus()).isEqualTo(TaskStatus.IN_PROGRESS);
+            assertThat(saved.getStartedAt()).isNotNull();
+            assertThat(saved.getVersion()).isGreaterThan(version);
+            assertThat(accepted.body().path("data").path("version").asLong()).isEqualTo(saved.getVersion());
         }
     }
 
@@ -232,8 +328,11 @@ class AgentTokenIntegrationTest extends AbstractIntegrationTest {
 
     private HttpResult machine(String method, String path, Object body, String token) throws Exception {
         try (var client = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER).build()) {
-            var request = request(method, path, body).header("Authorization", "Bearer " + token).build();
-            return result(client.send(request, HttpResponse.BodyHandlers.ofString()));
+            var builder = request(method, path, body);
+            if (token != null) {
+                builder.header("Authorization", "Bearer " + token);
+            }
+            return result(client.send(builder.build(), HttpResponse.BodyHandlers.ofString()));
         }
     }
 

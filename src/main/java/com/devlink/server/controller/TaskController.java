@@ -1,6 +1,9 @@
 package com.devlink.server.controller;
 
 import com.devlink.server.common.ApiResponse;
+import com.devlink.server.common.BusinessException;
+import com.devlink.server.common.ErrorCode;
+import com.devlink.server.domain.AgentPrincipal;
 import com.devlink.server.dto.CreateTaskRequest;
 import com.devlink.server.dto.CreateTaskResponse;
 import com.devlink.server.service.TaskCreationService;
@@ -11,6 +14,7 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.Positive;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
 
 @RestController
@@ -24,22 +28,28 @@ public class TaskController {
     public ResponseEntity<ApiResponse<ChangeTaskStatusResponse>> changeStatus(
             @PathVariable @Positive Long taskId,
             @Valid @RequestBody ChangeTaskStatusRequest request,
-            @RequestParam @Positive Long agentId) {
-        // TODO: Authorization: Bearer {Agent 연결 토큰} 인증 연동 후 agentId 요청 파라미터를
-        // 인증 객체로 교체하고, 검증된 객체에서 agentId를 추출한다. 현재 파라미터는 임시 입력이다.
-        return ResponseEntity.ok(ApiResponse.success(taskStatusService.changeStatus(taskId, agentId, request)));
+            @AuthenticationPrincipal AgentPrincipal principal) {
+        // 검증된 Agent 인증 객체에서 수신 Agent 식별자 추출
+        return ResponseEntity.ok(ApiResponse.success(
+                taskStatusService.changeStatus(taskId, requireAgentId(principal), request)));
     }
 
     @PostMapping("/{teamId}")
     public ResponseEntity<ApiResponse<CreateTaskResponse>> create(
             @PathVariable @Positive Long teamId,
             @Valid @RequestBody CreateTaskRequest request,
-            @RequestHeader("Authorization") String agentToken,
-            @RequestParam @Positive Long agentId) {
-        // TODO: Authorization: Bearer {Agent 연결 토큰} 검증 및 Agent 전용 보안 필터 연동.
-        // agentId 요청 파라미터는 임시 입력이며, 인증 연동 후 인증 객체로 교체하여 추출한다.
-        CreateTaskResponse response = taskCreationService.create(teamId, agentId, request);
+            @AuthenticationPrincipal AgentPrincipal principal) {
+        // 검증된 Agent 인증 객체에서 요청 Agent 식별자 추출
+        CreateTaskResponse response = taskCreationService.create(teamId, requireAgentId(principal), request);
         return ResponseEntity.status(response.replayed() ? 200 : 201)
                 .body(ApiResponse.success(response));
+    }
+
+    private long requireAgentId(AgentPrincipal principal) {
+        if (principal == null || principal.agentId() <= 0
+                || principal.ownerUserId() <= 0 || principal.teamId() <= 0) {
+            throw new BusinessException(ErrorCode.AUTHENTICATION_REQUIRED);
+        }
+        return principal.agentId();
     }
 }

@@ -73,6 +73,7 @@ public class SecurityConfig {
         };
         http.securityMatchers(matchers -> matchers
         		.requestMatchers("/api/v1/agent/**")
+                .requestMatchers("/api/v1/tasks", "/api/v1/tasks/**")
         		.requestMatchers(
         				HttpMethod.GET,
         				"/api/v1/teams/*/tasks",
