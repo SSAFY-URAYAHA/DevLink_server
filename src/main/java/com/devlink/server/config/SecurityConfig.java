@@ -85,7 +85,10 @@ public class SecurityConfig {
         				HttpMethod.GET,
         				"/api/v1/teams/*/tasks",
         				"/api/v1/tasks/*"
-        		))
+        		)
+        		.requestMatchers(HttpMethod.POST,
+        				"/api/v1/tasks/*/complete"
+        				))
                 .cors(cors -> cors.configurationSource(apiCorsConfigurationSource(allowedOrigins)))
                 // Agent 토큰 인증 시 기존 사용자 세션 ID 변경 방지
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS)
