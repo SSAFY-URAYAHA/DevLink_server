@@ -108,7 +108,7 @@ class AgentTokenIntegrationTest extends AbstractIntegrationTest {
             assertError(machine("POST", path, body, null), 401, "AUTHENTICATION_REQUIRED");
             assertError(machine("POST", path, body, "unrecognized-token"),
                     401, "AUTHENTICATION_REQUIRED");
-            assertThat(tasks.findByRequesterUserIdAndRequestKey(userId, requestKey)).isEmpty();
+            assertThat(tasks.findByRequesterAgentIdAndRequestKey(requesterId, requestKey)).isEmpty();
         }
     }
 
@@ -133,8 +133,8 @@ class AgentTokenIntegrationTest extends AbstractIntegrationTest {
                     "requestKey", wrongReceiverKey, "receiverAgentId", otherReceiverId,
                     "prompt", "Use a receiver outside the credential team"), token),
                     404, "RESOURCE_NOT_FOUND");
-            assertThat(tasks.findByRequesterUserIdAndRequestKey(userId, wrongTeamKey)).isEmpty();
-            assertThat(tasks.findByRequesterUserIdAndRequestKey(userId, wrongReceiverKey)).isEmpty();
+            assertThat(tasks.findByRequesterAgentIdAndRequestKey(requesterId, wrongTeamKey)).isEmpty();
+            assertThat(tasks.findByRequesterAgentIdAndRequestKey(requesterId, wrongReceiverKey)).isEmpty();
         }
     }
 
