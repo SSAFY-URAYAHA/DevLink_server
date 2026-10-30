@@ -7,6 +7,9 @@ import com.devlink.server.domain.agent.Agent;
 import com.devlink.server.dto.AgentResponse;
 import com.devlink.server.dto.CreateAgentRequest;
 import com.devlink.server.repository.AgentRepository;
+import com.devlink.server.repository.TaskRepository;
+import com.devlink.server.realtime.AgentCredentialsChangedEvent;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -14,10 +17,15 @@ import org.springframework.transaction.annotation.Transactional;
 public class AgentService {
     private final AgentRepository agents;
     private final TeamAuthorizationService authorization;
+    private final TaskRepository tasks;
+    private final ApplicationEventPublisher events;
 
-    public AgentService(AgentRepository agents, TeamAuthorizationService authorization) {
+    public AgentService(AgentRepository agents, TeamAuthorizationService authorization,
+            TaskRepository tasks, ApplicationEventPublisher events) {
         this.agents = agents;
         this.authorization = authorization;
+        this.tasks = tasks;
+        this.events = events;
     }
 
     @Transactional
@@ -42,6 +50,26 @@ public class AgentService {
                 .orElseThrow(() -> new BusinessException(ErrorCode.RESOURCE_NOT_FOUND));
         authorization.requireTeamMember(userId, agent.getTeamId());
         return AgentResponse.from(agent);
+    }
+
+    @Transactional
+    public void delete(Long userId, Long agentId) {
+        requireUser(userId);
+        requireAgentId(agentId);
+        Agent agent = agents.findByIdForUpdate(agentId)
+                .orElseThrow(() -> new BusinessException(ErrorCode.RESOURCE_NOT_FOUND));
+        authorization.requireTeamMember(userId, agent.getTeamId());
+        if (!agent.getOwnerUserId().equals(userId)) {
+            throw new BusinessException(ErrorCode.ACCESS_DENIED);
+        }
+        // 기존 작업 조회에서 참조하는 Agent 정보 보존
+        if (tasks.existsByRequesterAgentIdOrReceiverAgentId(agentId, agentId)) {
+            throw new BusinessException(ErrorCode.AGENT_HAS_TASKS);
+        }
+        agents.delete(agent);
+        agents.flush();
+        // 삭제 커밋 후 기존 브로커 연결과 ACK 대기 정리
+        events.publishEvent(new AgentCredentialsChangedEvent(agentId));
     }
 
     private void requireUser(Long userId) {

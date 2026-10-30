@@ -14,6 +14,8 @@ import org.springframework.data.domain.Pageable;
 
 
 public interface TaskRepository extends JpaRepository<Task, Long> {
+    boolean existsByRequesterAgentIdOrReceiverAgentId(Long requesterAgentId, Long receiverAgentId);
+
     Optional<Task> findByRequesterUserIdAndRequestKey(Long requesterUserId, String requestKey);
 
     @Lock(LockModeType.PESSIMISTIC_WRITE)

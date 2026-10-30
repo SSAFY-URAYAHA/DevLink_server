@@ -377,6 +377,37 @@ class AgentTokenIntegrationTest extends AbstractIntegrationTest {
         }
     }
 
+    @Test
+    void deletingUnusedAgentInvalidatesTokenAndClosesBrokerConnection() throws Exception {
+        try (var owner = new Browser(); var socketClient = HttpClient.newHttpClient()) {
+            owner.signupAndLogin();
+            long agentId = owner.createAgent(owner.createTeam());
+            String token = owner.issueToken(agentId);
+            var listener = new BrokerListener();
+            var socket = socketClient.newWebSocketBuilder()
+                    .header("Authorization", "Bearer " + token)
+                    .header("Origin", "http://localhost:3000")
+                    .buildAsync(URI.create("ws://localhost:" + port + "/ws/broker"), listener)
+                    .get(5, TimeUnit.SECONDS);
+            try {
+                listener.ready.get(5, TimeUnit.SECONDS);
+                assertThat(connections.findByAgentId(Long.toString(agentId))).isPresent();
+
+                assertSuccess(owner.mutate("DELETE", "/api/v1/agents/" + agentId, null), 200);
+
+                assertThat(agents.existsById(agentId)).isFalse();
+                assertThat(listener.closed.get(5, TimeUnit.SECONDS)).isBetween(1000, 4999);
+                assertThat(connections.findByAgentId(Long.toString(agentId))).isEmpty();
+                assertError(machine("GET", "/api/v1/agents/me", null, token), 401, "AUTHENTICATION_REQUIRED");
+                assertError(owner.mutate("POST", "/api/v1/agents/" + agentId + "/token", null),
+                        404, "RESOURCE_NOT_FOUND");
+                assertSuccess(owner.get("/api/v1/auth/users/me"), 200);
+            } finally {
+                socket.abort();
+            }
+        }
+    }
+
     private HttpResult machine(String method, String path, Object body, String token) throws Exception {
         try (var client = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER).build()) {
             var builder = request(method, path, body);

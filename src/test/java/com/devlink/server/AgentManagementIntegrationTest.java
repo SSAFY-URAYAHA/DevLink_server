@@ -12,9 +12,11 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.stream.Stream;
 import com.devlink.server.domain.agent.AgentStatus;
+import com.devlink.server.domain.task.Task;
 import com.devlink.server.domain.teammember.MemberRole;
 import com.devlink.server.domain.teammember.TeamMember;
 import com.devlink.server.repository.AgentRepository;
+import com.devlink.server.repository.TaskRepository;
 import com.devlink.server.repository.TeamMemberRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -30,6 +32,7 @@ class AgentManagementIntegrationTest extends AbstractIntegrationTest {
     @Autowired private ObjectMapper json;
     @Autowired private AgentRepository agents;
     @Autowired private TeamMemberRepository members;
+    @Autowired private TaskRepository tasks;
 
     @Test
     void registeringAgentUsesAuthenticatedOwnerAndReturnsOfflineProfileWithoutCredential() throws Exception {
@@ -107,6 +110,78 @@ class AgentManagementIntegrationTest extends AbstractIntegrationTest {
             long teamId = browser.createTeam();
             assertError(browser.send("POST", "/api/v1/agents/teams/" + teamId, agentBody(), null),
                     403, "ACCESS_DENIED");
+        }
+    }
+
+    @Test
+    void ownerCanDeleteUnusedAgentAndItDisappearsFromQueries() throws Exception {
+        try (var owner = new Browser()) {
+            owner.signupAndLogin();
+            long teamId = owner.createTeam();
+            long agentId = owner.createAgent(teamId);
+
+            var deleted = owner.mutate("DELETE", "/api/v1/agents/" + agentId, null);
+
+            assertSuccess(deleted, 200);
+            assertThat(deleted.body().path("data").isNull()).isTrue();
+            assertThat(agents.existsById(agentId)).isFalse();
+            assertThat(owner.get("/api/v1/agents/teams/" + teamId).body().path("data").size()).isZero();
+            assertError(owner.get("/api/v1/agents/" + agentId), 404, "RESOURCE_NOT_FOUND");
+            assertError(owner.mutate("DELETE", "/api/v1/agents/" + agentId, null), 404, "RESOURCE_NOT_FOUND");
+        }
+    }
+
+    @Test
+    void teamOwnerAndMemberCannotDeleteEachOthersAgents() throws Exception {
+        try (var owner = new Browser(); var teammate = new Browser(); var outsider = new Browser()) {
+            owner.signupAndLogin();
+            long teamId = owner.createTeam();
+            long ownerAgentId = owner.createAgent(teamId);
+            long teammateId = teammate.signupAndLogin();
+            members.saveAndFlush(TeamMember.create(teamId, teammateId, MemberRole.MEMBER));
+            long teammateAgentId = teammate.createAgent(teamId);
+            outsider.signupAndLogin();
+
+            assertError(teammate.mutate("DELETE", "/api/v1/agents/" + ownerAgentId, null), 403, "ACCESS_DENIED");
+            assertError(owner.mutate("DELETE", "/api/v1/agents/" + teammateAgentId, null), 403, "ACCESS_DENIED");
+            assertError(outsider.mutate("DELETE", "/api/v1/agents/" + ownerAgentId, null), 403, "ACCESS_DENIED");
+            assertThat(agents.existsById(ownerAgentId)).isTrue();
+            assertThat(agents.existsById(teammateAgentId)).isTrue();
+        }
+    }
+
+    @Test
+    void agentsReferencedByCompletedTasksCannotBeDeleted() throws Exception {
+        try (var owner = new Browser()) {
+            long userId = owner.signupAndLogin();
+            long teamId = owner.createTeam();
+            long requesterId = owner.createAgent(teamId);
+            long receiverId = owner.createAgent(teamId);
+            Task task = Task.create(UUID.randomUUID().toString(), teamId, requesterId, userId,
+                    receiverId, "Preserve task history");
+            task.accept(receiverId);
+            task.complete(receiverId, "Completed");
+            tasks.saveAndFlush(task);
+
+            assertError(owner.mutate("DELETE", "/api/v1/agents/" + requesterId, null), 409, "AGENT_HAS_TASKS");
+            assertError(owner.mutate("DELETE", "/api/v1/agents/" + receiverId, null), 409, "AGENT_HAS_TASKS");
+            assertThat(agents.existsById(requesterId)).isTrue();
+            assertThat(agents.existsById(receiverId)).isTrue();
+        }
+    }
+
+    @Test
+    void deletingAgentRequiresUserSessionCsrfAndValidId() throws Exception {
+        try (var owner = new Browser(); var anonymous = new Browser()) {
+            owner.signupAndLogin();
+            long agentId = owner.createAgent(owner.createTeam());
+            String path = "/api/v1/agents/" + agentId;
+
+            assertError(anonymous.send("DELETE", path, null, anonymous.csrf()), 401, "AUTHENTICATION_REQUIRED");
+            assertError(owner.send("DELETE", path, null, null), 403, "ACCESS_DENIED");
+            assertError(owner.mutate("DELETE", "/api/v1/agents/0", null), 400, "VALIDATION_FAILED");
+            assertError(owner.mutate("DELETE", "/api/v1/agents/invalid", null), 400, "VALIDATION_FAILED");
+            assertThat(agents.existsById(agentId)).isTrue();
         }
     }
 

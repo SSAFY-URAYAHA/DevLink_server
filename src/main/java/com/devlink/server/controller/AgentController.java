@@ -16,6 +16,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -57,6 +58,13 @@ public class AgentController {
     public ApiResponse<AgentResponse> get(@PathVariable @Positive Long agentId,
             @AuthenticationPrincipal UserPrincipal principal) {
         return ApiResponse.success(agents.get(userId(principal), agentId));
+    }
+
+    @DeleteMapping("/{agentId}")
+    public ApiResponse<Void> delete(@PathVariable @Positive Long agentId,
+            @AuthenticationPrincipal UserPrincipal principal) {
+        agents.delete(userId(principal), agentId);
+        return ApiResponse.success(null);
     }
 
     private Long userId(UserPrincipal principal) {

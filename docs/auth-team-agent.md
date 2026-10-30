@@ -71,8 +71,11 @@
 | GET | `/api/v1/agents/teams/{teamId}` | 사용자 세션 또는 Agent Bearer로 팀 Agent 목록 조회 |
 | GET | `/api/v1/agents/{agentId}` | 같은 팀 회원이 상세 조회 |
 | POST | `/api/v1/agents/{agentId}/token` | 소유자만 토큰 발급·회전, 201 |
+| DELETE | `/api/v1/agents/{agentId}` | 팀에 속한 소유자만 작업 이력이 없는 Agent 삭제, 200·data=null |
 
-등록 요청은 `name`(필수·100자), `roleDescription`(선택·255자), `toolType`(`CLAUDE_CODE` 또는 `CODEX`), `projectName`(필수·120자)입니다. 소유자는 로그인 정보로 결정하며 등록 초기 상태는 OFFLINE입니다. Agent 프로필 수정·삭제 및 토큰 폐기 API는 현재 MVP 범위에서 제외합니다.
+등록 요청은 `name`(필수·100자), `roleDescription`(선택·255자), `toolType`(`CLAUDE_CODE` 또는 `CODEX`), `projectName`(필수·120자)입니다. 소유자는 로그인 정보로 결정하며 등록 초기 상태는 OFFLINE입니다. Agent 프로필 수정 및 별도 토큰 폐기 API는 현재 MVP 범위에서 제외합니다.
+
+삭제는 사용자 세션과 CSRF 토큰이 필요하며 본문은 받지 않습니다. 팀 OWNER여도 다른 사용자의 Agent를 삭제할 수 없습니다. 요청·수신 작업이 하나라도 있으면 완료 여부와 관계없이 `409 AGENT_HAS_TASKS`로 거부해 기존 작업 조회에 필요한 Agent 정보를 보존합니다. 삭제 성공 시 Agent와 토큰 해시를 제거하고 커밋 후 기존 브로커 연결·ACK 대기를 정리합니다. 이미 삭제된 Agent는 404, 삭제된 Agent의 기존 토큰은 401을 반환합니다.
 
 조회 응답은 `agentId/teamId/ownerUserId/name/roleDescription/toolType/projectName/status/lastSeenAt/createdAt`입니다. 토큰과 해시는 포함하지 않습니다. 토큰 발급 응답의 `data`는 `agentId/token`이며 원문은 이 응답에서만 제공합니다. 토큰은 32바이트 난수로 만들고 DB에는 SHA-256 64자리 해시만 저장합니다. 한 Agent의 활성 토큰은 하나이며 재발급하면 기존 토큰을 거부합니다. 현재 MVP는 만료 시각 없이 재발급으로 토큰을 교체합니다.
 
