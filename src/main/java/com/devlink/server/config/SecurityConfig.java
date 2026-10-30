@@ -80,7 +80,9 @@ public class SecurityConfig {
         				"/api/v1/tasks/*"
         		))
                 .cors(cors -> cors.configurationSource(apiCorsConfigurationSource(allowedOrigins)))
-                .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+                // Agent 토큰 인증 시 기존 사용자 세션 ID 변경 방지
+                .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS)
+                        .sessionFixation(fixation -> fixation.none()))
                 .requestCache(AbstractHttpConfigurer::disable)
                 // 쿠키 인증을 사용하지 않는 Agent 전용 Bearer 경로에만 CSRF 예외 적용
                 .csrf(AbstractHttpConfigurer::disable)
