@@ -141,7 +141,7 @@ class TaskCreationIntegrationTest extends AbstractIntegrationTest {
         var response = service.create(teamId, agentId, request);
         assertThat(response.delivery()).isEqualTo(new TaskDeliveryResult(
                 TaskEventType.DELIVERY_UNKNOWN, "HISTORY_RECORD_FAILED"));
-        var task = tasks.findByRequesterUserIdAndRequestKey(userId, request.requestKey()).orElseThrow();
+        var task = tasks.findByRequesterAgentIdAndRequestKey(agentId, request.requestKey()).orElseThrow();
         assertThat(task.getDeliveredAt()).isNull();
         assertThat(task.getVersion()).isEqualTo(0L);
         assertThat(events.findByTaskIdOrderByCreatedAtAsc(task.getId()))
@@ -215,7 +215,7 @@ class TaskCreationIntegrationTest extends AbstractIntegrationTest {
                 .save(argThat(event -> event.getEventType() == TaskEventType.CREATED));
         assertThatThrownBy(() -> service.create(teamId, agentId, request))
                 .isInstanceOf(IllegalStateException.class);
-        assertThat(tasks.findByRequesterUserIdAndRequestKey(userId, request.requestKey())).isEmpty();
+        assertThat(tasks.findByRequesterAgentIdAndRequestKey(agentId, request.requestKey())).isEmpty();
         verifyNoInteractions(routing);
     }
 
@@ -252,15 +252,15 @@ class TaskCreationIntegrationTest extends AbstractIntegrationTest {
     }
 
     @Test
-    void sameOwnerAndKeyWithDifferentRequesterConflicts() {
-        service.create(teamId, agentId, request);
+    void sameOwnerAndKeyWithDifferentRequesterCreatesSeparateTask() {
+        var first = service.create(teamId, agentId, request);
         Long otherAgentId = agents.save(Agent.create(teamId, userId, "Other", null,
                 ToolType.CODEX, "project")).getId();
-        assertThatThrownBy(() -> service.create(teamId, otherAgentId, request))
-                .isInstanceOfSatisfying(BusinessException.class,
-                        error -> assertThat(error.getErrorCode()).isEqualTo(ErrorCode.REQUEST_KEY_CONFLICT));
-        assertThat(tasks.findByTeamIdOrderByCreatedAtDesc(teamId)).hasSize(1);
-        verify(routing, times(1)).sendTask(anyLong());
+        var second = service.create(teamId, otherAgentId, request);
+        assertThat(second.replayed()).isFalse();
+        assertThat(second.taskId()).isNotEqualTo(first.taskId());
+        assertThat(tasks.findByTeamIdOrderByCreatedAtDesc(teamId)).hasSize(2);
+        verify(routing, times(2)).sendTask(anyLong());
     }
 
     @Test
@@ -269,7 +269,7 @@ class TaskCreationIntegrationTest extends AbstractIntegrationTest {
         assertThatThrownBy(() -> service.create(teamId, agentId, invalid))
                 .isInstanceOfSatisfying(BusinessException.class,
                         error -> assertThat(error.getErrorCode()).isEqualTo(ErrorCode.RESOURCE_NOT_FOUND));
-        assertThat(tasks.findByRequesterUserIdAndRequestKey(userId, request.requestKey())).isEmpty();
+        assertThat(tasks.findByRequesterAgentIdAndRequestKey(agentId, request.requestKey())).isEmpty();
     }
 
     @Test
@@ -289,7 +289,7 @@ class TaskCreationIntegrationTest extends AbstractIntegrationTest {
             ready.countDown();
             if (!ready.await(10, TimeUnit.SECONDS)) throw new IllegalStateException("Missing concurrent request");
             return java.util.Optional.empty();
-        }).when(tasks).findByRequesterUserIdAndRequestKey(userId, request.requestKey());
+        }).when(tasks).findByRequesterAgentIdAndRequestKey(agentId, request.requestKey());
         try (var executor = Executors.newFixedThreadPool(2)) {
             var first = executor.submit(() -> service.create(teamId, agentId, request));
             var second = executor.submit(() -> service.create(teamId, agentId, request));

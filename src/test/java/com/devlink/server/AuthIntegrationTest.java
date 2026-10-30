@@ -269,7 +269,8 @@ class AuthIntegrationTest extends AbstractIntegrationTest {
             var replayed = other.postWithAgentToken(path, body, token);
             assertSuccess(replayed, 200);
             assertThat(replayed.body().path("data").path("taskId").asLong()).isEqualTo(taskId);
-            assertThat(tasks.findByRequesterUserIdAndRequestKey(otherId, requestKey)).isEmpty();
+            assertThat(tasks.findByRequesterAgentIdAndRequestKey(requester.getId(), requestKey))
+                    .hasValueSatisfying(saved -> assertThat(saved.getId()).isEqualTo(taskId));
             assertError(owner.postWithAgentToken(path, Map.of("requestKey", requestKey,
                     "prompt", "Missing receiver agent ID"), token), 400, "VALIDATION_FAILED");
             assertError(owner.postWithAgentToken(path, null, token), 400, "VALIDATION_FAILED");

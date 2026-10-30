@@ -10,7 +10,7 @@ import org.hibernate.type.SqlTypes;
 
 // Bounded context: identity.
 @Entity
-@Table(name = "agents")
+@Table(name = "agents", uniqueConstraints = @UniqueConstraint(name = "uk_agents_connection_token_hash", columnNames = {"connection_token_hash"}))
 @Getter
 @NoArgsConstructor(access = AccessLevel.PROTECTED)
 public class Agent {

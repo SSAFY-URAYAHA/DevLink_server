@@ -93,7 +93,7 @@ class DomainPersistenceIntegrationTest extends AbstractIntegrationTest {
             saved.markOffline();
             assertThat(saved.getStatus()).isEqualTo(AgentStatus.OFFLINE);
         });
-        assertThat(tasks.findByRequesterUserIdAndRequestKey(user.getId(), "request")).hasValueSatisfying(saved -> {
+        assertThat(tasks.findByRequesterAgentIdAndRequestKey(agent.getId(), "request")).hasValueSatisfying(saved -> {
             assertThat(saved.getStatus()).isEqualTo(TaskStatus.COMPLETED);
             assertThat(saved.getResultText()).isEqualTo("Done");
         });
