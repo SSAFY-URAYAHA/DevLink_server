@@ -198,10 +198,18 @@ class DevLinkWebSocketHandlerTest {
         var message = ArgumentCaptor.forClass(TextMessage.class);
         verify(session).sendMessage(message.capture());
         var ready = mapper.readTree(message.getValue().getPayload());
-        assertThat(ready.path("type").asText()).isEqualTo("BROKER_READY");
-        assertThat(ready.path("payload").path("connection_id").asText()).isEqualTo("conn_001");
-        assertThat(ready.path("payload").path("agent_id").asLong()).isEqualTo(11);
-        assertThat(ready.path("payload").size()).isEqualTo(2);
+        // 인증된 사용자·팀 ID가 숫자로 포함되고 토큰 등 불필요한 필드가 추가되지 않는지 확인한다.
+        assertThat(ready).isEqualTo(mapper.readTree("""
+                {
+                  "type": "BROKER_READY",
+                  "payload": {
+                    "connection_id": "conn_001",
+                    "agent_id": 11,
+                    "user_id": 21,
+                    "team_id": 31
+                  }
+                }
+                """));
         assertThat(registry.findByAgentId("11")).contains(session);
     }
 

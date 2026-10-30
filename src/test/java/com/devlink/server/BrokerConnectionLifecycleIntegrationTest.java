@@ -40,6 +40,11 @@ class BrokerConnectionLifecycleIntegrationTest extends AbstractIntegrationTest {
                 var registered = registry.findByAgentId("11").orElseThrow();
                 assertThat(ready.path("type").asText()).isEqualTo("BROKER_READY");
                 assertThat(ready.path("payload").path("agent_id").asLong()).isEqualTo(11);
+                // 실제 WebSocket 응답에도 검증된 사용자·팀 ID가 필수 숫자 필드로 전달되는지 확인한다.
+                assertThat(ready.path("payload").path("user_id").isIntegralNumber()).isTrue();
+                assertThat(ready.path("payload").path("user_id").longValue()).isEqualTo(21);
+                assertThat(ready.path("payload").path("team_id").isIntegralNumber()).isTrue();
+                assertThat(ready.path("payload").path("team_id").longValue()).isEqualTo(31);
                 assertThat(ready.path("payload").path("connection_id").asText())
                         .isEqualTo(registered.getId());
 
@@ -65,6 +70,9 @@ class BrokerConnectionLifecycleIntegrationTest extends AbstractIntegrationTest {
                 var second = connect(client, secondListener);
                 try {
                     JsonNode secondReady = ready(secondListener);
+                    // 재접속해도 새 READY에 동일한 인증 신원이 포함되어 로컬 신원을 다시 구성할 수 있다.
+                    assertThat(secondReady.path("payload").path("user_id").longValue()).isEqualTo(21);
+                    assertThat(secondReady.path("payload").path("team_id").longValue()).isEqualTo(31);
                     assertThat(firstListener.closed.get(5, TimeUnit.SECONDS)).isEqualTo(4002);
                     await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
                         var current = registry.findByAgentId("11").orElseThrow();
