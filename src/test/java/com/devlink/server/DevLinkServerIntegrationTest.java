@@ -33,14 +33,20 @@ class DevLinkServerIntegrationTest extends AbstractIntegrationTest {
 
     @Test
     void migratedSchemaPassesValidationAndHealthAndSecurityWork() {
-        assertThat(entityManagerFactory.getMetamodel().getEntities()).hasSize(7);
-        assertThat(flyway.info().all()).hasSize(1);
-        assertThat(flyway.info().current().getVersion().getVersion()).isEqualTo("1");
+        assertThat(entityManagerFactory.getMetamodel().getEntities())
+                .extracting(entity -> entity.getName())
+                .containsExactlyInAnyOrder("TaskFile", "TeamMember", "TaskEvent", "User",
+                        "Team", "OutboxEvent", "Agent", "Task");
+        assertThat(flyway.info().applied())
+                .extracting(migration -> migration.getVersion().getVersion())
+                .containsExactly("1", "2", "3", "4", "5", "6");
+        assertThat(flyway.info().pending()).isEmpty();
+        assertThat(flyway.info().current().getVersion().getVersion()).isEqualTo("6");
         assertThat(flyway.validateWithResult().validationSuccessful).isTrue();
         List<String> tables = jdbc.queryForList(
                 "SELECT tablename FROM pg_tables WHERE schemaname = 'public'", String.class);
         assertThat(tables).containsExactlyInAnyOrder("users", "teams", "team_members", "agents",
-                "tasks", "task_files", "task_events", "flyway_schema_history");
+                "tasks", "task_files", "task_events", "outbox_events", "flyway_schema_history");
 
         var health = rest.getForEntity("/api/v1/health", JsonNode.class);
         assertThat(health.getStatusCode()).isEqualTo(HttpStatus.OK);

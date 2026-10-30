@@ -37,3 +37,6 @@ out/
 # ---- OS ----
 .DS_Store
 Thumbs.db
+
+# Java 빌드 산출물
+/bin/

@@ -1,6 +1,8 @@
 package com.devlink.server.domain.task;
 
 import java.time.LocalDateTime;
+
+import com.devlink.server.exception.InvalidTaskInputException;
 import jakarta.persistence.*;
 import lombok.AccessLevel;
 import lombok.Getter;
@@ -8,7 +10,7 @@ import lombok.NoArgsConstructor;
 
 // Bounded context: task.
 @Entity
-@Table(name = "tasks", uniqueConstraints = @UniqueConstraint(name = "uk_tasks_request_key", columnNames = {"requester_user_id", "request_key"}))
+@Table(name = "tasks", uniqueConstraints = @UniqueConstraint(name = "uk_tasks_request_key", columnNames = {"requester_agent_id", "request_key"}))
 @Getter
 @NoArgsConstructor(access = AccessLevel.PROTECTED)
 public class Task {
@@ -90,9 +92,25 @@ public class Task {
         this.startedAt = LocalDateTime.now();
     }
 
-    /** The caller must save task status and result files in one service transaction. */
+    /** 수신 Agent가 시작 전 작업을 거절한다. 사유는 resultText, 종료 시각은 completedAt에 저장한다. */
+    public void reject(Long agentId, String reason) {
+        requireReceiverAndStatus(agentId, TaskStatus.PENDING);
+        requireValue(reason, "rejectionReason");
+
+        this.status = TaskStatus.REJECTED;
+        this.resultText = reason;
+        this.partiallyModified = false;
+        this.completedAt = LocalDateTime.now();
+    }
+
+    /** 메서드 호출 시 작업 상태와 결과 파일 정보를 하나의 트랜잭션으로 저장
+     *  이 메서드는 Task의 상태, 결과 요약, 완료 시각 변경을 담당하므로
+     *  Service에서 TaskFile 정보를 저장할것
+     * */
     public void complete(Long agentId, String resultText) {
         requireReceiverAndStatus(agentId, TaskStatus.IN_PROGRESS);
+        requireValue(resultText, "resultText");
+
         this.status = TaskStatus.COMPLETED;
         this.resultText = resultText;
         this.completedAt = LocalDateTime.now();
@@ -100,6 +118,8 @@ public class Task {
 
     public void fail(Long agentId, String reason, boolean partiallyModified) {
         requireReceiverAndStatus(agentId, TaskStatus.IN_PROGRESS);
+        requireValue(reason, "reason");
+
         this.status = TaskStatus.FAILED;
         this.resultText = reason;
         this.partiallyModified = partiallyModified;
@@ -122,7 +142,7 @@ public class Task {
 
     private static void requireValue(Object value, String field) {
         if (value == null || (value instanceof String text && text.isBlank())) {
-            throw new IllegalArgumentException(field + " must not be null or blank");
+            throw new InvalidTaskInputException(field + " must not be null or blank");
         }
     }
 }
