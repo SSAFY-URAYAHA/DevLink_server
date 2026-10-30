@@ -1,6 +1,5 @@
 package com.devlink.server.controller;
 
-import java.util.List;
 import com.devlink.server.common.ApiResponse;
 import com.devlink.server.common.BusinessException;
 import com.devlink.server.common.ErrorCode;
@@ -14,21 +13,15 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 @RestController
-@RequestMapping("/api/v1/agent")
+@RequestMapping("/api/v1/agents")
 @RequiredArgsConstructor
 public class AgentApiController {
     private final AgentService agents;
 
-    @GetMapping("/context")
+    @GetMapping("/me")
     public ApiResponse<AgentResponse> context(@AuthenticationPrincipal AgentPrincipal principal) {
         AgentPrincipal actor = requireAgent(principal);
         return ApiResponse.success(agents.get(actor.ownerUserId(), actor.agentId()));
-    }
-
-    @GetMapping("/agents")
-    public ApiResponse<List<AgentResponse>> list(@AuthenticationPrincipal AgentPrincipal principal) {
-        AgentPrincipal actor = requireAgent(principal);
-        return ApiResponse.success(agents.list(actor.ownerUserId(), actor.teamId()));
     }
 
     private AgentPrincipal requireAgent(AgentPrincipal principal) {

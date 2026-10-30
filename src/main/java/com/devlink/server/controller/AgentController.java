@@ -4,6 +4,7 @@ import java.util.List;
 import com.devlink.server.common.ApiResponse;
 import com.devlink.server.common.BusinessException;
 import com.devlink.server.common.ErrorCode;
+import com.devlink.server.domain.AgentPrincipal;
 import com.devlink.server.domain.UserPrincipal;
 import com.devlink.server.dto.AgentResponse;
 import com.devlink.server.dto.CreateAgentRequest;
@@ -38,8 +39,18 @@ public class AgentController {
 
     @GetMapping("/teams/{teamId}")
     public ApiResponse<List<AgentResponse>> list(@PathVariable @Positive Long teamId,
-            @AuthenticationPrincipal UserPrincipal principal) {
-        return ApiResponse.success(agents.list(userId(principal), teamId));
+            @AuthenticationPrincipal Object principal) {
+        if (principal instanceof AgentPrincipal agent) {
+            // Agent 토큰은 해당 Agent가 속한 팀의 목록만 조회 허용
+            if (agent.teamId() != teamId.longValue()) {
+                throw new BusinessException(ErrorCode.ACCESS_DENIED);
+            }
+            return ApiResponse.success(agents.list(agent.ownerUserId(), teamId));
+        }
+        if (principal instanceof UserPrincipal user) {
+            return ApiResponse.success(agents.list(userId(user), teamId));
+        }
+        throw new BusinessException(ErrorCode.AUTHENTICATION_REQUIRED);
     }
 
     @GetMapping("/{agentId}")

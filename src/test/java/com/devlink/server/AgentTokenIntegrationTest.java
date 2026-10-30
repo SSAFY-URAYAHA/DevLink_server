@@ -64,11 +64,11 @@ class AgentTokenIntegrationTest extends AbstractIntegrationTest {
             long secondAgentId = second.createAgent(teamId);
             String firstToken = first.issueToken(firstAgentId);
             String secondToken = second.issueToken(secondAgentId);
-            var listing = machine("GET", "/api/v1/agent/agents", null, firstToken);
+            var listing = machine("GET", "/api/v1/agents/teams/" + teamId, null, firstToken);
             assertSuccess(listing, 200);
             assertThat(listing.body().path("data").findValuesAsText("agentId"))
                     .containsExactlyInAnyOrder(Long.toString(firstAgentId), Long.toString(secondAgentId));
-            var secondContext = machine("GET", "/api/v1/agent/context", null, secondToken);
+            var secondContext = machine("GET", "/api/v1/agents/me", null, secondToken);
             assertSuccess(secondContext, 200);
             assertThat(secondContext.body().path("data").path("agentId").asLong()).isEqualTo(secondAgentId);
 
@@ -198,7 +198,7 @@ class AgentTokenIntegrationTest extends AbstractIntegrationTest {
             String storedHash = agents.findById(agentId).orElseThrow().getConnectionTokenHash();
             assertThat(storedHash).matches("[0-9a-f]{64}").isEqualTo(hash(token)).isNotEqualTo(token);
 
-            var context = machine("GET", "/api/v1/agent/context", null, token);
+            var context = machine("GET", "/api/v1/agents/me", null, token);
             assertSuccess(context, 200);
             JsonNode profile = context.body().path("data");
             assertThat(profile.path("agentId").asLong()).isEqualTo(agentId);
@@ -207,8 +207,9 @@ class AgentTokenIntegrationTest extends AbstractIntegrationTest {
             assertThat(profile.has("token")).isFalse();
             assertThat(profile.has("connectionTokenHash")).isFalse();
 
-            var listing = machine("GET", "/api/v1/agent/agents", null, token);
+            var listing = machine("GET", "/api/v1/agents/teams/" + teamId, null, token);
             assertSuccess(listing, 200);
+            assertThat(listing.body()).isEqualTo(owner.get("/api/v1/agents/teams/" + teamId).body());
             assertThat(listing.body().path("data").findValuesAsText("agentId"))
                     .containsExactlyInAnyOrder(Long.toString(agentId), Long.toString(otherAgentId));
         }
@@ -220,14 +221,14 @@ class AgentTokenIntegrationTest extends AbstractIntegrationTest {
             owner.signupAndLogin();
             long agentId = owner.createAgent(owner.createTeam());
             String firstToken = owner.issueToken(agentId);
-            assertSuccess(machine("GET", "/api/v1/agent/context", null, firstToken), 200);
+            assertSuccess(machine("GET", "/api/v1/agents/me", null, firstToken), 200);
 
             String secondToken = owner.issueToken(agentId);
 
             assertThat(secondToken).isNotEqualTo(firstToken);
             assertThat(agents.findById(agentId).orElseThrow().getConnectionTokenHash()).isEqualTo(hash(secondToken));
-            assertError(machine("GET", "/api/v1/agent/context", null, firstToken), 401, "AUTHENTICATION_REQUIRED");
-            assertSuccess(machine("GET", "/api/v1/agent/context", null, secondToken), 200);
+            assertError(machine("GET", "/api/v1/agents/me", null, firstToken), 401, "AUTHENTICATION_REQUIRED");
+            assertSuccess(machine("GET", "/api/v1/agents/me", null, secondToken), 200);
             assertSuccess(owner.get("/api/v1/auth/users/me"), 200);
         }
     }
@@ -245,7 +246,7 @@ class AgentTokenIntegrationTest extends AbstractIntegrationTest {
             assertError(teammate.mutate("POST", "/api/v1/agents/" + agentId + "/token", null),
                     403, "ACCESS_DENIED");
             assertThat(agents.findById(agentId).orElseThrow().getConnectionTokenHash()).isEqualTo(hash(originalToken));
-            assertSuccess(machine("GET", "/api/v1/agent/context", null, originalToken), 200);
+            assertSuccess(machine("GET", "/api/v1/agents/me", null, originalToken), 200);
         }
     }
 
@@ -260,30 +261,80 @@ class AgentTokenIntegrationTest extends AbstractIntegrationTest {
             members.delete(membership);
             members.flush();
 
-            assertError(machine("GET", "/api/v1/agent/context", null, token), 401, "AUTHENTICATION_REQUIRED");
+            assertError(machine("GET", "/api/v1/agents/me", null, token), 401, "AUTHENTICATION_REQUIRED");
             assertError(owner.mutate("POST", "/api/v1/agents/" + agentId + "/token", null),
                     403, "ACCESS_DENIED");
         }
     }
 
     @Test
-    void userSessionAndAgentBearerCannotReplaceEachOthersAuthentication() throws Exception {
+    void userSessionAndAgentBearerRemainSeparateOutsideSharedListing() throws Exception {
         try (var owner = new Browser()) {
             owner.signupAndLogin();
             long teamId = owner.createTeam();
             long agentId = owner.createAgent(teamId);
             String token = owner.issueToken(agentId);
 
-            assertError(owner.get("/api/v1/agent/context"), 401, "AUTHENTICATION_REQUIRED");
-            assertError(owner.get("/api/v1/agent/agents"), 401, "AUTHENTICATION_REQUIRED");
+            assertError(owner.get("/api/v1/agents/me"), 401, "AUTHENTICATION_REQUIRED");
+            assertSuccess(owner.get("/api/v1/agents/teams/" + teamId), 200);
             assertError(owner.get("/ws/broker"), 401, "AUTHENTICATION_REQUIRED");
             assertError(machine("GET", "/api/v1/auth/users/me", null, token), 401, "AUTHENTICATION_REQUIRED");
-            assertError(machine("GET", "/api/v1/agents/teams/" + teamId, null, token),
+            assertSuccess(machine("GET", "/api/v1/agents/teams/" + teamId, null, token), 200);
+            assertError(machine("GET", "/api/v1/agents/" + agentId, null, token),
                     401, "AUTHENTICATION_REQUIRED");
-            assertError(machine("GET", "/api/v1/agent/context", null, "unrecognized-token"),
+            assertError(machine("POST", "/api/v1/agents/teams/" + teamId, Map.of(
+                    "name", "Another agent", "toolType", "CODEX", "projectName", "devlink"), token),
+                    403, "ACCESS_DENIED");
+            assertError(machine("GET", "/api/v1/agents/me", null, "unrecognized-token"),
                     401, "AUTHENTICATION_REQUIRED");
             assertError(owner.send("POST", "/api/v1/agents/" + agentId + "/token", null, null),
                     403, "ACCESS_DENIED");
+        }
+    }
+
+    @Test
+    void sharedListingUsesAgentHeaderWithoutChangingUserSession() throws Exception {
+        try (var owner = new Browser(); var outsider = new Browser()) {
+            owner.signupAndLogin();
+            long teamId = owner.createTeam();
+            String token = owner.issueToken(owner.createAgent(teamId));
+            String path = "/api/v1/agents/teams/" + teamId;
+            long outsiderId = outsider.signupAndLogin();
+            String sessionId = outsider.sessionId();
+
+            assertError(outsider.get(path), 403, "ACCESS_DENIED");
+            assertSuccess(outsider.getWithAuthorization(path, "Bearer " + token), 200);
+            assertThat(outsider.sessionId()).isEqualTo(sessionId);
+            assertThat(outsider.get("/api/v1/auth/users/me").body().path("data").path("userId").asLong())
+                    .isEqualTo(outsiderId);
+            assertError(outsider.get(path), 403, "ACCESS_DENIED");
+
+            assertError(owner.getWithAuthorization(path, "Bearer unrecognized-token"),
+                    401, "AUTHENTICATION_REQUIRED");
+            assertError(owner.getWithAuthorization(path, "Basic invalid"),
+                    401, "AUTHENTICATION_REQUIRED");
+            assertSuccess(owner.get(path), 200);
+        }
+    }
+
+    @Test
+    void agentListingCannotUseOwnersOtherTeamMembership() throws Exception {
+        try (var owner = new Browser()) {
+            owner.signupAndLogin();
+            long teamId = owner.createTeam();
+            long otherTeamId = owner.createTeam();
+            String token = owner.issueToken(owner.createAgent(teamId));
+            String otherTeamPath = "/api/v1/agents/teams/" + otherTeamId;
+
+            assertSuccess(owner.get(otherTeamPath), 200);
+            assertError(machine("GET", otherTeamPath, null, token), 403, "ACCESS_DENIED");
+            assertError(owner.getWithAuthorization(otherTeamPath, "Bearer " + token), 403, "ACCESS_DENIED");
+            assertError(machine("GET", "/api/v1/agents/teams/" + teamId, null, null),
+                    401, "AUTHENTICATION_REQUIRED");
+            assertError(machine("GET", "/api/v1/agents/teams/0", null, token),
+                    400, "VALIDATION_FAILED");
+            assertError(machine("GET", "/api/v1/agents/teams/invalid", null, token),
+                    400, "VALIDATION_FAILED");
         }
     }
 
@@ -317,9 +368,9 @@ class AgentTokenIntegrationTest extends AbstractIntegrationTest {
                     assertThat(connections.findByAgentId(Long.toString(agentId))).isEmpty();
                     assertThat(agents.findById(agentId).orElseThrow().getStatus()).isEqualTo(AgentStatus.OFFLINE);
                 });
-                assertError(machine("GET", "/api/v1/agent/context", null, firstToken),
+                assertError(machine("GET", "/api/v1/agents/me", null, firstToken),
                         401, "AUTHENTICATION_REQUIRED");
-                assertSuccess(machine("GET", "/api/v1/agent/context", null, nextToken), 200);
+                assertSuccess(machine("GET", "/api/v1/agents/me", null, nextToken), 200);
             } finally {
                 socket.abort();
             }
@@ -373,8 +424,9 @@ class AgentTokenIntegrationTest extends AbstractIntegrationTest {
     private record Csrf(String headerName, String token) { }
 
     private final class Browser implements AutoCloseable {
+        private final CookieManager cookies = new CookieManager(null, CookiePolicy.ACCEPT_ALL);
         private final HttpClient client = HttpClient.newBuilder()
-                .cookieHandler(new CookieManager(null, CookiePolicy.ACCEPT_ALL))
+                .cookieHandler(cookies)
                 .followRedirects(HttpClient.Redirect.NEVER)
                 .connectTimeout(Duration.ofSeconds(5)).build();
 
@@ -415,6 +467,17 @@ class AgentTokenIntegrationTest extends AbstractIntegrationTest {
 
         private HttpResult get(String path) throws Exception {
             return send("GET", path, null, null);
+        }
+
+        private HttpResult getWithAuthorization(String path, String authorization) throws Exception {
+            var builder = request("GET", path, null).header("Authorization", authorization);
+            return result(client.send(builder.build(), HttpResponse.BodyHandlers.ofString()));
+        }
+
+        private String sessionId() {
+            return cookies.getCookieStore().getCookies().stream()
+                    .filter(cookie -> "JSESSIONID".equals(cookie.getName()))
+                    .findFirst().orElseThrow().getValue();
         }
 
         private HttpResult mutate(String method, String path, Object body) throws Exception {
