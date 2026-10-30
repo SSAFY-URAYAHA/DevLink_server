@@ -10,7 +10,7 @@ import lombok.NoArgsConstructor;
 
 // Bounded context: task.
 @Entity
-@Table(name = "tasks", uniqueConstraints = @UniqueConstraint(name = "uk_tasks_request_key", columnNames = {"requester_user_id", "request_key"}))
+@Table(name = "tasks", uniqueConstraints = @UniqueConstraint(name = "uk_tasks_request_key", columnNames = {"requester_agent_id", "request_key"}))
 @Getter
 @NoArgsConstructor(access = AccessLevel.PROTECTED)
 public class Task {
