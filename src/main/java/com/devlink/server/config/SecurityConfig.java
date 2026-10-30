@@ -77,7 +77,10 @@ public class SecurityConfig {
         				HttpMethod.GET,
         				"/api/v1/teams/*/tasks",
         				"/api/v1/tasks/*"
-        		))
+        		)
+        		.requestMatchers(HttpMethod.POST,
+        				"/api/v1/tasks/*/complete"
+        				))
                 .cors(cors -> cors.configurationSource(apiCorsConfigurationSource(allowedOrigins)))
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .requestCache(AbstractHttpConfigurer::disable)
